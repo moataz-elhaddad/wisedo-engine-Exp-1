@@ -21,19 +21,19 @@ const cand = (o) => ({
   brand: 'Lenovo', model: 'IdeaPad Slim 3 15IAH8', mpn: null, cpu: 'Intel Core i5-12450H', ram_gb: 16, storage_gb: 512,
   gpu: 'Intel UHD Graphics (integrated)', display: '15.6in FHD IPS', screen_inches: 15.6, os: 'Windows 11', weight_kg: 1.62,
   battery_hours: 8, price_egp: 33000, price_basis: 'recent_knowledge', availability_egypt: 'likely_available', grey_import: false,
-  offers: [{ retailer: 'Amazon Egypt', url: 'https://www.amazon.eg/dp/IDEAPAD3', price_egp: 33000 }],
+  offers: [{ retailer: 'Amazon Egypt', url: 'https://www.amazon.eg/dp/B0IDEAPAD3', price_egp: 33000 }],
   fit_reasons: ['16 GB RAM for programming'], confidence: 0.7, evidence: 'from training knowledge', ...o,
 });
 
 export const X = cand({});                                   // the same configuration, named three ways below
-export const X_ALT = cand({ model: 'Lenovo IdeaPad Slim 3 15IAH8 Laptop', price_egp: 34500, offers: [{ retailer: 'Noon', url: 'https://www.noon.com/egypt-en/ideapad3/p/', price_egp: 34500 }] });
-export const X_8GB = cand({ ram_gb: 8, price_egp: 29000, offers: [{ retailer: 'B.TECH', url: 'https://btech.com/en/ideapad-8gb', price_egp: 29000 }] });
+export const X_ALT = cand({ model: 'Lenovo IdeaPad Slim 3 15IAH8 Laptop', price_egp: 34500, offers: [{ retailer: 'Noon', url: 'https://www.noon.com/egypt-en/ideapad-slim-3/N70012345V/p/', price_egp: 34500 }] });
+export const X_8GB = cand({ ram_gb: 8, price_egp: 29000, offers: [{ retailer: 'B.TECH', url: 'https://btech.com/en/lenovo-ideapad-slim-3-8gb-512gb', price_egp: 29000 }] });
 export const Y = cand({ brand: 'HP', model: 'Victus 15-fa1xxx', cpu: 'Intel Core i5-13420H', gpu: 'NVIDIA GeForce RTX 3050 6GB', price_egp: 39000, weight_kg: 2.3,
-  offers: [{ retailer: '2B', url: 'https://2b.com.eg/en/victus-15', price_egp: 39000 }] });
+  offers: [{ retailer: '2B', url: 'https://2b.com.eg/en/hp-victus-15-fa1xxx-i5-13420h', price_egp: 39000 }] });
 export const Z = cand({ brand: 'Asus', model: 'Vivobook 15 X1504VA', cpu: 'Intel Core i7-1355U', ram_gb: 16, storage_gb: 1024, gpu: 'Intel Iris Xe', price_egp: 37000,
   offers: [{ retailer: 'Raya Shop', url: null, price_egp: 37000 }] });
 export const A = cand({ brand: 'Apple', model: 'MacBook Air 13 M2', cpu: 'Apple M2', ram_gb: 8, storage_gb: 256, gpu: null, display: '13.6in Liquid Retina', screen_inches: 13.6, weight_kg: 1.24, os: 'macOS', price_egp: 47000,
-  offers: [{ retailer: 'Amazon Egypt', url: 'https://www.amazon.eg/dp/MBAM2', price_egp: 47000 }] });
+  offers: [{ retailer: 'Amazon Egypt', url: 'https://www.amazon.eg/dp/B0MBAM2XYZ', price_egp: 47000 }] });
 export const NO_PRICE = cand({ brand: 'Dell', model: 'Inspiron 15 3530', cpu: 'Intel Core i5-1335U', price_egp: null, offers: [{ retailer: 'Dell', url: null, price_egp: null }] });
 
 // Provider-format responses -----------------------------------------------------------------------------------
@@ -66,12 +66,20 @@ export const groqResponse = (c, e) => chatResponse(c, { model: 'groq/compound', 
 
 /** Shop listing titles as they look on Egyptian retailers. */
 export const LISTINGS = {
-  ideapad: { title: 'Lenovo IdeaPad Slim 3 15IAH8 Laptop - Intel Core i5-12450H, 16GB RAM, 512GB SSD, Intel UHD Graphics, 15.6" FHD IPS', source: 'Amazon.eg', link: 'https://www.amazon.eg/dp/IDEAPAD3', price: 'EGP 32,499.00' },
-  ideapad8: { title: 'Lenovo IdeaPad Slim 3 15IAH8 - Core i5-12450H - 8GB RAM - 512GB SSD', source: 'B.TECH', link: 'https://btech.com/en/ideapad-8gb', price: 'EGP 28,999.00' },
+  ideapad: { title: 'Lenovo IdeaPad Slim 3 15IAH8 Laptop - Intel Core i5-12450H, 16GB RAM, 512GB SSD, Intel UHD Graphics, 15.6" FHD IPS', source: 'Amazon.eg', link: 'https://www.amazon.eg/dp/B0IDEAPAD3', price: 'EGP 32,499.00' },
+  ideapad8: { title: 'Lenovo IdeaPad Slim 3 15IAH8 - Core i5-12450H - 8GB RAM - 512GB SSD', source: 'B.TECH', link: 'https://btech.com/en/lenovo-ideapad-slim-3-8gb-512gb', price: 'EGP 28,999.00' },
   vivobook: { title: 'ASUS Vivobook 16 X1605VA, Intel Core i7-13620H, 16GB RAM, 1TB SSD, Intel UHD Graphics, 16" WUXGA', source: '2B', link: 'https://2b.com.eg/en/vivobook-16-x1605va', price: 'EGP 38,750.00' },
-  mouse: { title: 'Logitech M185 Wireless Mouse', source: 'Noon', link: 'https://www.noon.com/egypt-en/m185/p/', price: 'EGP 450.00' },
+  mouse: { title: 'Logitech M185 Wireless Mouse', source: 'Noon', link: 'https://www.noon.com/egypt-en/m185/N11111111A/p/', price: 'EGP 450.00' },
   usd: { title: 'HP Victus 15-fa1xxx Intel Core i5-13420H 16GB 512GB RTX 3050', source: 'BestBuy', link: 'https://www.bestbuy.com/victus', price: '$649.99' },
 };
+export const asListing = (x, provider = 'serper', kind = 'shopping') => ({ provider, kind, title: x.title, url: x.link, price_text: x.price, source: x.source });
+/** Egyptian direct product listings (shopping-provider shape) that can verify X, Y, Z and an XPS. */
+export const EG_LISTINGS = [
+  { ...LISTINGS.ideapad },
+  { title: 'HP Victus 15-fa1xxx Intel Core i5-13420H 16GB RAM 512GB SSD NVIDIA GeForce RTX 3050 6GB', source: '2B', link: 'https://2b.com.eg/en/hp-victus-15-fa1xxx-i5-13420h', price: 'EGP 39,000.00' },
+  { title: 'ASUS Vivobook 15 X1504VA Intel Core i7-1355U 16GB RAM 1TB SSD Intel Iris Xe', source: 'Raya Shop', link: 'https://www.rayashop.com/en/asus-vivobook-15-x1504va-i7-1355u-16gb-1tb', price: 'EGP 36,999.00' },
+  { title: 'Dell XPS 15 9530 Intel Core i7-13700H 16GB 512GB RTX 4060', source: 'Amazon.eg', link: 'https://www.amazon.eg/dp/B0XPS15953', price: 'EGP 95,000.00' },
+].map((x) => asListing(x));
 export const serperShopping = (items) => ({ shopping: items.map((x, i) => ({ ...x, position: i + 1 })), credits: 1 });
 export const serperSearch = (items) => ({ organic: items.map((x, i) => ({ title: x.title, link: x.link, snippet: `${x.title} price ${x.price}`, position: i + 1 })), credits: 1 });
 export const tavilyResponse = (results) => ({ query: 'q', results: results.map((r) => ({ title: r.title, url: r.link || r.url, content: r.content || `${r.title} – available in Egypt for ${r.price || 'n/a'}`, score: 0.8 })), response_time: 1.2 });
@@ -108,9 +116,12 @@ export function fakeFetch(routes = {}, pages = {}) {
 }
 
 export const PAGES = {
-  'https://www.amazon.eg/dp/IDEAPAD3': '<html><title>Lenovo IdeaPad Slim 3 15IAH8 Laptop, Intel Core i5-12450H, 16GB RAM, 512GB SSD</title><script type="application/ld+json">{"offers":{"price":"32999","priceCurrency":"EGP"}}</script></html>',
-  'https://www.noon.com/egypt-en/ideapad3/p/': 403,
-  'https://btech.com/en/ideapad-8gb': '<html><title>Lenovo IdeaPad Slim 3 8GB 512GB</title><body>Out of stock</body></html>',
-  'https://2b.com.eg/en/victus-15': '<html><title>HP Victus 15 gaming laptop</title><body>RTX 3050</body></html>',
-  'https://www.amazon.eg/dp/MBAM2': '<html><title>Samsung Galaxy Tab S9</title></html>',
+  'https://www.amazon.eg/dp/B0IDEAPAD3': '<html><title>Lenovo IdeaPad Slim 3 15IAH8 Laptop, Intel Core i5-12450H, 16GB RAM, 512GB SSD</title><script type="application/ld+json">{"offers":{"price":"32999","priceCurrency":"EGP"}}</script></html>',
+  'https://www.noon.com/egypt-en/ideapad-slim-3/N70012345V/p/': 403,
+  'https://btech.com/en/lenovo-ideapad-slim-3-8gb-512gb': '<html><title>Lenovo IdeaPad Slim 3 8GB 512GB</title><body>Out of stock</body></html>',
+  'https://2b.com.eg/en/hp-victus-15-fa1xxx-i5-13420h': '<html><title>HP Victus 15 gaming laptop</title><body>RTX 3050</body></html>',
+  'https://www.amazon.eg/dp/B0MBAM2XYZ': '<html><title>Samsung Galaxy Tab S9</title></html>',
+  'https://www.rayashop.com/en/asus-vivobook-15-x1504va-i7-1355u-16gb-1tb': '<html><title>ASUS Vivobook 15 X1504VA i7-1355U 16GB 1TB</title><body>EGP 36,999</body></html>',
+  'https://www.amazon.eg/dp/B0XPS15953': '<html><title>Dell XPS 15 9530 Core i7-13700H 16GB 512GB RTX 4060</title></html>',
+  'https://2b.com.eg/en/vivobook-16-x1605va': '<html><title>ASUS Vivobook 16 X1605VA Intel Core i7-13620H 16GB RAM 1TB SSD</title><script type="application/ld+json">{"offers":{"price":"38750","priceCurrency":"EGP"}}</script></html>',
 };

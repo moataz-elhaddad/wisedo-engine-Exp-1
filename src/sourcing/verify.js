@@ -66,6 +66,15 @@ export function pagePrices(html) {
   return [...new Set(out)].slice(0, 10);
 }
 
+/** Currency of the page's prices: JSON-LD/itemprop priceCurrency, else an Egyptian-pound marker in the text. */
+export function pageCurrency(html) {
+  const m = html.match(/"priceCurrency"\s*:\s*"([A-Za-z]{3})"/) || html.match(/itemprop=["']priceCurrency["'][^>]*content=["']([A-Za-z]{3})["']/);
+  if (m) return m[1].toUpperCase();
+  if (/\bEGP\b|ج\.م|جنيه|E£/.test(html)) return 'EGP';
+  if (/\bAED\b|\bSAR\b|US\$|\bUSD\b/.test(html)) return 'OTHER';
+  return null;
+}
+
 function pageTitle(html) {
   const m = html.match(/<title[^>]*>([^<]{0,300})/i);
   return m ? m[1].replace(/\s+/g, ' ').trim() : null;
@@ -130,7 +139,7 @@ export async function verifyUrl(url, cand, opts = {}) {
     else if ((cmp.mpn || cmp.modelShare >= 0.6) && specOk) status = 'verified';
     else status = 'partial';
     if (status !== 'mismatch' && OUT_OF_STOCK.test(html)) status = 'unavailable';
-    return { url, status, http: res.status, ms: ms(), title, final_url: res.url || url, match: cmp, page_prices: prices };
+    return { url, status, http: res.status, ms: ms(), title, final_url: res.url || url, match: cmp, page_prices: prices, page_currency: pageCurrency(html) };
   } catch (e) {
     const msg = e && e.name === 'AbortError' ? 'timeout' : String((e && e.message) || e).slice(0, 120);
     return { url, status: msg === 'timeout' ? 'unreachable' : 'error', error: msg, ms: Date.now() - t0 };

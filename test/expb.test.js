@@ -8,6 +8,7 @@ import { createOpenAiProvider, createAnthropicProvider, createGeminiProvider, pr
 import { normalizeProviderOutput, cleanUrl } from '../src/sourcing/normalize.js';
 import { consolidate, sameProduct, cpuToken, gpuToken } from '../src/sourcing/consolidate.js';
 import { verifyCandidates, pagePrices } from '../src/sourcing/verify.js';
+import { collectOffers, verifyOffers } from '../src/sourcing/offers.js';
 import { buildEphemeralSnapshot, resolveRetailer, EPHEMERAL_TENANT } from '../src/sourcing/ephemeral-snapshot.js';
 import { buildDiscoveryRequest, describeNeed, DISCOVERY_SCHEMA } from '../src/sourcing/discovery-prompt.js';
 import { discoverProducts, runProvider } from '../src/sourcing/discover.js';
@@ -304,7 +305,7 @@ test('verification can be switched off: candidates stay, marked not checked, low
 });
 
 test('consensus is not evidence: three providers agreeing on an unverifiable product keep low evidence', async () => {
-  const blind = { ...F.X, offers: [{ retailer: 'Noon', url: 'https://www.noon.com/egypt-en/ideapad3/p/', price_egp: 33000 }] };
+  const blind = { ...F.X, offers: [{ retailer: 'Noon', url: 'https://www.noon.com/egypt-en/ideapad-slim-3/N70012345V/p/', price_egp: 33000 }] };
   const products = consolidate([norm(blind, 'a'), norm(blind, 'b'), norm(blind, 'c')], ['a', 'b', 'c']);
   await verifyCandidates(products, { fetch: F.fakeFetch({}, F.PAGES) });
   assert.equal(products[0].provider_consensus_score, 1);
@@ -314,10 +315,16 @@ test('consensus is not evidence: three providers agreeing on an unverifiable pro
 
 // --- ephemeral snapshot ---------------------------------------------------------------------------------------
 
+/** The verified-offer pipeline (no network): Egyptian listings + page checks against recorded pages. */
+async function verifyAll(products, listings = F.EG_LISTINGS, pages = F.PAGES) {
+  collectOffers(products, listings);
+  await verifyOffers(products, { fetch: F.fakeFetch({}, pages) });
+  return products;
+}
+
 async function builtSnapshot() {
-  const f = F.fakeFetch({}, F.PAGES);
   const products = consolidate([norm(F.X, 'a'), norm(F.X_ALT, 'b'), norm(F.Y, 'a'), norm(F.Z, 'b'), norm(F.A, 'a'), norm(F.NO_PRICE, 'a')], ['a', 'b']);
-  await verifyCandidates(products, { fetch: f });
+  await verifyAll(products);
   return { products, ...buildEphemeralSnapshot(products, { configs: F.CONFIGS, category: 'laptop', now: F.NOW, requestId: 't1' }) };
 }
 
@@ -327,19 +334,21 @@ test('snapshot conversion: the same CatalogSnapshot contract as the catalog, in 
   assert.equal(v.ok, true, v.errors.join('\n'));
   assert.equal(snapshot.tenant_id, EPHEMERAL_TENANT);
   assert.equal(snapshot.ephemeral, true);
-  assert.equal(snapshot.products.length, 4);
-  assert.deepEqual(unrankable.map((u) => u.brand), ['Dell'], 'no price -> not rankable');
+  assert.equal(snapshot.products.length, 3, 'Lenovo, HP and Asus have verified Egyptian listings');
+  assert.deepEqual(unrankable.map((u) => u.brand).sort(), ['Apple', 'Dell'], 'Apple: the page is another product; Dell: no listing');
+  assert.equal(unrankable.find((u) => u.brand === 'Apple').reason, 'variant_mismatch');
   for (const p of snapshot.products) {
     assert.equal(p.ref_price_egp, null, 'no fabricated reference price');
     assert.equal(p.checked_at, F.NOW);
     assert.ok(index[p.id].providers.length >= 1);
   }
   const asus = snapshot.offers.find((o) => o.product_id.includes('asus'));
-  assert.equal(asus.url_kind, 'search_link');
-  assert.ok(asus.assumptions.includes('delivery'));
+  assert.equal(asus.url_kind, 'direct_product');
+  assert.equal(asus.url, 'https://www.rayashop.com/en/asus-vivobook-15-x1504va-i7-1355u-16gb-1tb');
+  for (const o of snapshot.offers) assert.ok(!/google\./.test(o.url), 'no search URL fallback');
   assert.equal(snapshot.plans.length, 0);
   const lenovoAmazon = snapshot.offers.find((o) => o.product_id.includes('lenovo') && o.retailer_id === 'amazon_eg');
-  assert.equal(lenovoAmazon.price_egp, 32999, 'structured page price beats the provider claim');
+  assert.equal(lenovoAmazon.price_egp, 32999, 'the verified page price beats the listing and the LLM claim (33,000)');
   assert.equal(resolveRetailer({ url: 'https://www.btech.com/x' }).id, 'btech');
   assert.equal(resolveRetailer({ retailer: 'Some Shop' }).trust, 6);
 });
@@ -361,7 +370,7 @@ test('consensus never decides the winner: an over-budget product named by every 
   const pricey = { ...F.X, brand: 'Dell', model: 'XPS 15 9530', cpu: 'Intel Core i7-13700H', gpu: 'NVIDIA GeForce RTX 4060', price_egp: 95000, offers: [{ retailer: 'Amazon Egypt', url: null, price_egp: 95000 }] };
   const cands = [norm(pricey, 'a'), norm(pricey, 'b'), norm(pricey, 'c'), norm(F.X, 'a')];
   const products = consolidate(cands, ['a', 'b', 'c']);
-  await verifyCandidates(products, { enabled: false });
+  await verifyAll(products);
   const { snapshot, index } = buildEphemeralSnapshot(products, { configs: F.CONFIGS, category: 'laptop', now: F.NOW });
   const dell = Object.keys(index).find((id) => id.includes('dell'));
   assert.equal(index[dell].provider_count, 3);
@@ -432,7 +441,9 @@ test('worker: /api/expb/run needs the token, validates the profile, runs end to 
   assert.equal(r.body.providers.find((p) => p.provider === 'gemini').ok, false);
   assert.ok(r.body.top3.length >= 1 && r.body.top3.length <= 3);
   assert.ok(r.body.top3[0].discovery.providers.length >= 1);
-  assert.ok(r.body.consolidated.find((c) => c.brand === 'Lenovo').provider_count === 2);
+  assert.ok(r.body.candidates.find((c) => c.brand === 'Lenovo').provider_count === 2);
+  assert.ok(r.body.top3.every((t) => t.verified && /^https:\/\/www\.amazon\.eg\/dp\//.test(t.url)), 'only verified Egyptian product pages');
+  assert.ok(r.body.unverified_candidates.some((c) => c.brand === 'Apple' && c.exclusion_reason === 'variant_mismatch'));
   assert.ok(Array.isArray(r.body.catalog.top3));
   assert.ok(typeof r.body.metrics.total_ms === 'number');
   for (const k of ['sk-openai-SECRET', 'sk-ant-SECRET', 'gemini-SECRET']) assert.ok(!JSON.stringify(r.body).includes(k), 'no key in the response');

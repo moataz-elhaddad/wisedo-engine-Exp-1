@@ -9,9 +9,10 @@
 //   - ref_price_egp: null (no deal bonus, no resale value) - a provider's price is not a reference price
 //   - plans: none. Card / finance buyers get no installment quote (Layer 2 then drops those offers, as it would
 //     for a catalog offer without a plan). Reported in the response.
-// Candidates without any price cannot be ranked (Layer 2 needs offer.price_egp > 0): listed as unrankable.
+// Only VERIFIED offers enter a final snapshot (direct Egyptian product page, EGP price, variant match: offers.js).
+// Candidates without one are listed as unrankable with their exclusion reason. No search-link fallback exists.
 import { laptopAttrs } from './specs.js';
-import { isClassifieds } from './listings.js';
+import { isEgyptianProductPage } from './url-classify.js';
 
 export const EPHEMERAL_TENANT = 'expb-ephemeral';
 
@@ -48,8 +49,6 @@ export function resolveRetailer(offer) {
   return { id: `shop-${slugify(host || label) || 'unknown'}`, name: label, trust: 6, cod: false, return_days: 7, base_url: host ? `https://${host}` : null, known: false };
 }
 
-/** Search link used when a candidate has a price but no product URL (flagged as a search link, not a product page). */
-const searchUrl = (p) => `https://www.google.com/search?q=${encodeURIComponent(`${p.brand} ${p.model} ${p.mpn || ''} price Egypt`.trim())}`;
 
 /**
  * @param {any[]} products   consolidated + verified candidates
@@ -75,43 +74,48 @@ export function buildEphemeralSnapshot(products, ctx) {
       ref_price_egp: null, popular: false, aliases: p.mpn ? [p.mpn] : [], attrs,
       checked_at: nowIso, source: 'crawl',
     };
-    // Offers: one per priced shop listing; a priced candidate without any listing gets one "unknown shop" offer.
-    const listing = p.offers.length ? p.offers : [{ retailer: null, url: null, price_egp: p.price_egp, provider: p.providers[0] }];
+    // Final snapshots carry VERIFIED offers only (offers.js): direct Egyptian product page + EGP price + variant
+    // match. The provisional mode (evidence targeting only, never ranked for the buyer) prices LLM claims.
+    const provisional = ctx.mode === 'provisional';
+    const listing = provisional
+      ? (p.offers && p.offers.length ? p.offers : [{ retailer: null, url: null, price_egp: p.price_egp, provider: p.providers[0] }])
+      : (p.verified_offers || []);
     const made = [];
     for (const o of listing) {
-      const price = o.page_price_egp ?? o.listing_price_egp ?? o.price_egp ?? (listing.length === 1 ? p.price_egp : null);
+      const price = provisional ? (o.price_egp ?? (listing.length === 1 ? p.price_egp : null)) : o.price_egp;
       if (!(typeof price === 'number' && price > 0)) continue;
-      if (o.url && isClassifieds(o.url)) continue; // used / unofficial ads are evidence, never a retail offer
+      if (!provisional && !(o.url && isEgyptianProductPage(o.url))) continue; // defence in depth
       const r = resolveRetailer(o);
-      if (!retailers.has(r.id)) retailers.set(r.id, { id: r.id, tenant_id: EPHEMERAL_TENANT, name: r.name, trust: r.trust, return_days: r.return_days, cod: r.cod, base_url: r.base_url, affiliate_tag: null, source: 'crawl', known: r.known });
+      if (!retailers.has(r.id)) retailers.set(r.id, { id: r.id, tenant_id: EPHEMERAL_TENANT, name: o.retailer && !r.known ? o.retailer : r.name, trust: r.trust, return_days: r.return_days, cod: r.cod, base_url: r.base_url, affiliate_tag: null, source: 'crawl', known: r.known });
       const oid = `o-${id}-${r.id}`;
       if (made.some((x) => x.id === oid)) continue;
-      const offer = {
+      made.push({
         id: oid, tenant_id: EPHEMERAL_TENANT, product_id: id, retailer_id: r.id,
-        url: o.url || searchUrl(p), price_egp: price,
+        url: o.url || '', price_egp: price,
         delivery: Object.fromEntries((ctx.configs[ctx.category].zones.ids || []).map((z) => [z, { fee: 0, days: 3 }])),
-        in_stock: o.in_stock !== false && p.availability !== 'out_of_stock',
+        in_stock: true,
         official: p.grey_import !== true,
         extras: [], checked_at: nowIso, source: 'crawl',
         // Experiment metadata (ignored by Layer 2):
-        url_kind: o.url ? 'product_page' : 'search_link',
-        price_source: o.price_source || (o.source === 'listing' ? 'listing' : o.price_egp ? 'provider_offer' : 'provider_estimate'),
+        url_kind: provisional ? 'provisional' : 'direct_product',
+        price_source: provisional ? 'llm_claim' : o.price_source,
         found_by: o.provider || null,
-        verification: o.verification || (o.url ? 'not_checked' : 'no_url'),
-        ...(o.rejected_url ? { rejected_url: o.rejected_url } : {}),
+        verification: provisional ? 'provisional' : o.page_check,
+        match_strength: o.match_strength || null,
         assumptions: ['delivery', ...(r.known ? [] : ['retailer_terms'])],
-      };
-      made.push(offer);
+      });
     }
-    if (!made.length) { unrankable.push({ key: p.key, brand: p.brand, model: p.model, reason: 'no price from any provider or page' }); continue; }
+    if (!made.length) { unrankable.push({ key: p.key, brand: p.brand, model: p.model, reason: provisional ? 'no claimed price' : (p.exclusion_reason || 'no_verified_offer') }); continue; }
     offers.push(...made);
     outProducts.push(product);
     index[id] = {
-      key: p.key, mpn: p.mpn,
+      key: p.key, mpn: p.mpn, status: p.status || null,
       raw: { cpu: p.cpu, ram_gb: p.ram_gb, storage_gb: p.storage_gb, gpu: p.gpu, display: p.display, os: p.os, weight_kg: p.weight_kg, battery_hours: p.battery_hours },
       attr_mapping: mapping,
       providers: p.providers, provider_count: p.provider_count, provider_consensus_score: p.provider_consensus_score,
       verification_status: p.verification_status, evidence_confidence: p.evidence_confidence,
+      verified_price: p.verified_price ?? null, verified_retailer: p.verified_retailer ?? null, verified_product_url: p.verified_product_url ?? null,
+      variant_match_strength: p.variant_match_strength ?? null, llm_claimed_price: p.llm_claimed_price ?? null, llm_claimed_retailer: p.llm_claimed_retailer ?? null,
       price_range: p.price_range, fit_reasons: p.fit_reasons,
       evidence_urls: (p.evidence_urls || []).slice(0, 12), evidence_providers: p.evidence_providers || [], listing_evidence: (p.listing_evidence || []).slice(0, 10), merged_because: p.merged_because, possible_duplicates: p.possible_duplicates,
     };

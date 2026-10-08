@@ -35,6 +35,13 @@ const pickRow = (pick, index) => {
     reasons: pick.reasons,
     notListed: pick.notListed,
     warnings: pick.warnings,
+    // Only verified Egyptian product pages reach the snapshot, so a ranked row always carries its direct link.
+    verified: !!(meta && meta.verified_product_url),
+    mpn: meta ? meta.mpn || null : null,
+    variant_match_strength: meta ? meta.variant_match_strength || null : null,
+    verified_price: meta ? meta.verified_price ?? null : null,
+    verified_retailer: meta ? meta.verified_retailer || null : null,
+    verified_product_url: meta ? meta.verified_product_url || null : null,
     ...(meta ? { discovery: meta } : {}),
   };
 };
@@ -113,7 +120,7 @@ async function runHandler(env, request, h) {
   const llmSource = new LLMProductDiscoverySource({
     providers: available, missing, configs: CONFIGS, requestId,
     verify: { enabled: String(env.DISCOVERY_VERIFY || '1') !== '0', maxUrls: Number(env.DISCOVERY_VERIFY_MAX_URLS) || 12, timeoutMs: Number(env.DISCOVERY_VERIFY_TIMEOUT_MS) || 5000 },
-    evidence: { enabled: String(env.DISCOVERY_EVIDENCE || '1') !== '0', maxCandidates: Number(env.DISCOVERY_EVIDENCE_MAX) || 5, providers: String(env.DISCOVERY_EVIDENCE_PROVIDERS || 'serper').split(',').map((x) => x.trim()) },
+    evidence: { enabled: String(env.DISCOVERY_EVIDENCE || '1') !== '0', maxCandidates: Number(env.DISCOVERY_EVIDENCE_MAX) || 6, providers: String(env.DISCOVERY_EVIDENCE_PROVIDERS || 'serper,tavily').split(',').map((x) => x.trim()) },
   });
   const [llm, cat] = await Promise.all([
     recommendWith(llmSource, profile, now),
@@ -136,20 +143,20 @@ async function runHandler(env, request, h) {
     evidence_runs: meta.evidence_runs,
     raw: meta.raw,
     queries: meta.request.queries,
-    consolidated: meta.consolidated.map((c) => ({
-      key: c.key, brand: c.brand, model: c.model, mpn: c.mpn, cpu: c.cpu, ram_gb: c.ram_gb, storage_gb: c.storage_gb, gpu: c.gpu, display: c.display,
-      price_egp: c.price_egp, price_range: c.price_range, providers: c.providers, provider_count: c.provider_count, provider_consensus_score: c.provider_consensus_score,
-      verification_status: c.verification_status, evidence_confidence: c.evidence_confidence, verification: c.verification,
-      offers: c.offers, evidence_urls: c.evidence_urls, evidence_providers: c.evidence_providers, listing_evidence: c.listing_evidence, found_at: c.found_at, possible_duplicates: c.possible_duplicates, merged_because: c.merged_because, fit_reasons: c.fit_reasons,
-      product_id: Object.keys(meta.index).find((id) => meta.index[id].key === c.key) || null,
-    })),
+    // Per-candidate observability (offers.js candidateReport): LLM claims vs verified listing facts.
+    candidates: meta.candidates_report,
+    verified_candidates: meta.candidates_report.filter((c) => c.status === 'verified'),
+    unverified_candidates: meta.candidates_report.filter((c) => c.status !== 'verified'),
     unrankable: meta.unrankable,
     top3,
+    ...(top3.length ? {} : { no_verified_message: 'No sufficiently verified Egyptian product listings were found for this request.' }),
     result: { status: result.status, others: result.others, warnings: result.warnings, gaveUp: result.gaveUp, nothingFits: result.nothingFits, counts: result.counts, assumptions: result.assumptions, trace: result.trace },
     catalog: { snapshot_id: catalog.snapshot_id, status: cat.result.status, top3: catalogTop3, note: 'Same NeedProfile, same engine, synthetic demo catalog (comparison only).' },
     notes: [
       'Provider consensus, evidence confidence and verification are metadata; the ranking is the unchanged Recommendation Engine (customer fit, price fit).',
-      'LLM offers assume nationwide delivery (fee 0, 3 days) and carry no installment plans; card/finance buyers therefore get no LLM-sourced plan quotes.',
+      'Only verified offers are ranked: a direct Egyptian product page, an EGP price from the listing or the page, the exact variant and an identifiable retailer. LLM prices, retailers and stock are unverified claims (shown, never ranked).',
+      'Top results are never back-filled with unverified candidates: fewer than three verified products means fewer results.',
+      'Verified offers assume nationwide delivery (fee 0, 3 days) and carry no installment plans.',
       'Nothing discovered here was saved to any catalog.',
     ],
     metrics: { ...meta.metrics, total_ms, providers_missing: missing.map((x) => x.name) },

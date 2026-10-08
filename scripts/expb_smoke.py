@@ -8,7 +8,9 @@ Runs the full pipeline the way the UI does:
 Prints a readable summary and writes expb-status.json, expb-profile.json, expb-run.json.
 
 usage: EXPB_URL=https://... WISEDO_ADMIN_TOKEN=... python3 scripts/expb_smoke.py ["need text"] [--require-providers N]
-Exit 1 when the run fails or fewer than N providers succeed.
+  EXPB_TEXT  the need text (default: the Arabic gaming-laptop test case)
+  EXPB_EDITS JSON object of Layer 1 chip edits applied after the text, e.g. {"brand":["asus"],"acceptImports":"no"}
+Exit 1 when the run fails, fewer than N providers succeed, or a Top result is not a verified Egyptian product page.
 """
 import json, os, sys, time, urllib.request, urllib.error
 
@@ -16,8 +18,8 @@ URL = os.environ["EXPB_URL"].rstrip("/")
 TOKEN = os.environ.get("WISEDO_ADMIN_TOKEN", "").strip()
 argv = sys.argv[1:]
 args = [a for i, a in enumerate(argv) if not a.startswith("--") and not (i > 0 and argv[i - 1] == "--require-providers")]
-TEXT = args[0] if args else ("I need a laptop for programming and daily work, around EGP 40,000, good battery life, "
-                             "16GB RAM or more, available in Egypt.")
+TEXT = args[0] if args else (os.environ.get("EXPB_TEXT") or "عاوز لابتوب في حدود ٤٠ الف جنيه يكون gaming لاخويا الصغير")
+EDITS = json.loads(os.environ.get("EXPB_EDITS") or '{"use":["gaming"],"brand":["asus"],"budget":40000,"acceptImports":"no","who":"kid"}')
 need = 1
 if "--require-providers" in sys.argv:
     need = int(sys.argv[sys.argv.index("--require-providers") + 1])
@@ -65,6 +67,11 @@ if ui["screen"] in ("tiles", "unsupported", "not_configured"):
     state, ui = s1["state"], s1["ui"]
 print("need text:", TEXT)
 print("layer 1 first screen:", ui["screen"], "| filled:", {k: v["value"] for k, v in state.get("values", {}).items()})
+for slot, value in EDITS.items():
+    code, se = call("POST", "/api/session", {"state": state, "event": {"type": "edit", "slot": slot, "value": value}})
+    assert code == 200 and se.get("state"), (code, se)
+    state, ui = se["state"], se["ui"]
+    print(f"edit {slot} = {value} -> {ui['screen']} {ui.get('error') or ''}")
 if ui["screen"] != "result":
     code, s2 = call("POST", "/api/session", {"state": state, "event": {"type": "showNow"}})
     assert code == 200 and s2["ui"]["screen"] == "result", (code, s2 and s2.get("ui", {}).get("screen"))
@@ -98,21 +105,36 @@ for r in run.get("raw", []):
         print(f"  listing {r['provider']:<7} {l.get('kind'):<8} {str(l.get('price_text') or '')[:18]:<18} {str(l.get('title'))[:110]} | {str(l.get('url'))[:80]}")
 for e in run.get("evidence_runs", []):
     print(f"  evidence {e['provider']:<8} {'OK' if e['ok'] else 'FAIL'} {e['latency_ms']/1000:.1f}s listings {e['listing_count']} {e.get('error') or ''}")
-print("\nconsolidated:")
-for c in run["consolidated"]:
-    print(f"  {c['key']:>3} {c['brand']} {c['model']} | {c.get('cpu')} {c.get('ram_gb')}GB {c.get('storage_gb')}GB {c.get('gpu')} | "
-          f"{c.get('price_egp')} EGP | found by {c['providers']} ({c['provider_consensus_score']}) | evidence from {c.get('evidence_providers')} | "
-          f"{c['verification_status']} {c['evidence_confidence']} | ranked {'yes' if c.get('product_id') else 'no'}")
-print("\nTOP 3 (existing Recommendation Engine):")
+def cand_line(c):
+    sp = c.get("specs") or {}
+    return (f"{c['brand']} {c['model']} {c.get('mpn') or ''} | {sp.get('cpu')} {sp.get('ram_gb')}GB {sp.get('storage_gb')}GB {sp.get('gpu')} | "
+            f"found by {c['discovered_by']} ({c['provider_consensus_score']}) | LLM claim {c.get('llm_claimed_price')} @ {c.get('llm_claimed_retailer')} | "
+            f"verified {c.get('verified_price')} @ {c.get('verified_retailer')} {c.get('verified_product_url') or ''} | "
+            f"{c['verification_status']} {c.get('variant_match_strength')} | excl {c.get('exclusion_reason')}")
+print(f"\nverified candidates ({len(run['verified_candidates'])}):")
+for c in run["verified_candidates"]:
+    print("  " + cand_line(c))
+print(f"\npromising but unverified ({len(run['unverified_candidates'])}):")
+for c in run["unverified_candidates"]:
+    print("  " + cand_line(c))
+    for r in (c.get("rejections") or [])[:4]:
+        print(f"      rejected {r['reason']}: {str(r.get('url'))[:100]} {r.get('detail') or ''}")
+print("\nexcluded by reason:", json.dumps(run["metrics"].get("excluded_by_reason")))
+print("\nTOP results (existing Recommendation Engine, verified only):")
+if not run["top3"]:
+    print("  " + str(run.get("no_verified_message")))
+bad = []
 for p in run["top3"]:
     d = p.get("discovery") or {}
-    print(f"  #{p['rank']} {p['role']}: {p['product']['brand']} {p['product']['name']} | {p.get('price')} EGP at {p.get('retailer')} | "
-          f"score {p['score']} (fit {p['fit']}) | found by {d.get('providers')} consensus {d.get('provider_consensus_score')} | "
-          f"{d.get('verification_status')} evidence {d.get('evidence_confidence')} | {p.get('url')}")
+    print(f"  #{p['rank']} {p['role']}: {p['product']['brand']} {p['product']['name']} | MPN {p.get('mpn')} | {p.get('verified_price')} EGP at {p.get('verified_retailer')} | "
+          f"{p.get('verified_product_url')} | match {p.get('variant_match_strength')} | score {p['score']} (fit {p['fit']}) | "
+          f"found by {d.get('providers')} consensus {d.get('provider_consensus_score')} | {d.get('verification_status')} | evidence {d.get('evidence_providers')}")
+    if not p.get("verified") or not p.get("verified_product_url") or not p.get("verified_price"):
+        bad.append(p["rank"])
 print("\ncatalog Top 3 (same profile):")
 for p in run["catalog"]["top3"]:
     print(f"  #{p['rank']} {p['product']['name']} | {p.get('price')} EGP | score {p['score']}")
 ok_n = sum(1 for p in run["providers"] if p["ok"])
-if code != 200 or ok_n < need:
-    print(f"FAILED: HTTP {code}, {ok_n} providers succeeded (need {need})")
+if code != 200 or ok_n < need or bad:
+    print(f"FAILED: HTTP {code}, {ok_n} providers succeeded (need {need}), unverified Top results {bad}")
     sys.exit(1)

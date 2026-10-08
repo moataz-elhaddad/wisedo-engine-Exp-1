@@ -1,0 +1,288 @@
+// Experiment B: only verified Egyptian direct product listings become offers; everything else is evidence or a claim.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync, readdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import * as F from './expb-fixtures.js';
+import { classifyUrl, isEgyptianProductPage } from '../src/sourcing/url-classify.js';
+import { collectOffers, verifyOffers, candidateReport, exclusionCounts } from '../src/sourcing/offers.js';
+import { normalizeProviderOutput } from '../src/sourcing/normalize.js';
+import { consolidate } from '../src/sourcing/consolidate.js';
+import { buildEphemeralSnapshot } from '../src/sourcing/ephemeral-snapshot.js';
+import { buildDiscoveryRequest } from '../src/sourcing/discovery-prompt.js';
+import { exactQueries } from '../src/sourcing/search-providers.js';
+import { match } from '../src/layer2/index.js';
+import { validateSnapshot } from '../src/contracts.js';
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const norm = (c, provider) => normalizeProviderOutput({ candidates: [c] }, provider, F.NOW).candidates[0];
+const listing = (title, url, price, source = 'shop') => F.asListing({ title, link: url, price, source });
+
+/** Run the offer pipeline on one LLM candidate + listings + pages; return the product and its snapshot. */
+async function run(cand, listings = [], pages = {}) {
+  const products = consolidate([norm(cand, 'gemini')], ['gemini']);
+  collectOffers(products, listings);
+  await verifyOffers(products, { fetch: F.fakeFetch({}, pages) });
+  const built = buildEphemeralSnapshot(products, { configs: F.CONFIGS, category: 'laptop', now: F.NOW });
+  return { p: products[0], ...built };
+}
+
+const IDEAPAD_TITLE = 'Lenovo IdeaPad Slim 3 15IAH8 Laptop - Intel Core i5-12450H, 16GB RAM, 512GB SSD, Intel UHD Graphics';
+const NO_URL = { ...F.X, offers: [{ retailer: 'B.TECH', url: null, price_egp: 33000 }] };
+
+// --- URL classification --------------------------------------------------------------------------------------
+
+test('URL classification: every page type, and only Egyptian direct product pages can sell', () => {
+  const cases = {
+    'https://www.amazon.eg/dp/B0CX23V2ZK': ['direct_product', true],
+    'https://www.noon.com/egypt-en/asus-tuf-gaming-f15/N70098765V/p/': ['direct_product', true],
+    'https://www.jumia.com.eg/asus-tuf-gaming-f15-fx507zc4-i5-12500h-16gb-512gb-rtx3050-123456789.html': ['direct_product', true],
+    'https://btech.com/en/laptops/c/123': ['category', true],
+    'https://2b.com.eg/en/computers/laptops.html': ['category', true],
+    'https://www.amazon.eg/s?k=asus+tuf': ['search_results', true],
+    'https://www.google.com/search?q=asus+tuf+egypt': ['search_results', false],
+    'https://btech.com/en/': ['homepage', true],
+    'https://www.asus.com/laptops/for-gaming/tuf-gaming/asus-tuf-gaming-f15-2023/': ['manufacturer_specs', false],
+    'https://www.notebookcheck.net/Asus-TUF-Gaming-F15-review.html': ['article', false],
+    'https://www.dubizzle.com.eg/en/ad/asus-tuf-f15-ID12345.html': ['classified', true],
+    'https://eg.pricena.com/en/product/asus-tuf-f15-price-in-egypt': ['comparison', true],
+    'https://www.amazon.ae/dp/B0CX23V2ZK': ['foreign_store', false],
+    'https://www.noon.com/saudi-en/asus-tuf-gaming-f15/N70098765V/p/': ['foreign_store', false],
+  };
+  for (const [url, [type, egypt]] of Object.entries(cases)) {
+    const c = classifyUrl(url);
+    assert.equal(c.type, type, url);
+    assert.equal(c.egypt, egypt, url);
+  }
+  assert.equal(isEgyptianProductPage('https://www.amazon.eg/dp/B0CX23V2ZK'), true);
+  assert.equal(isEgyptianProductPage('https://www.amazon.ae/dp/B0CX23V2ZK'), false);
+  assert.equal(classifyUrl('https://www.noon.com/uae-en/x/N70098765V/p/').country, 'AE');
+  assert.equal(classifyUrl('https://www.jarir.com/sa-en/asus-tuf-gaming-laptop-12345.html').country, 'SA');
+});
+
+// --- offer decisions -----------------------------------------------------------------------------------------
+
+test('a direct Egyptian product page with the exact variant and an EGP price is a verified offer', async () => {
+  const url = 'https://www.amazon.eg/dp/B0IDEAPAD3';
+  const { p, snapshot } = await run(F.X, [listing(IDEAPAD_TITLE, url, 'EGP 32,499.00', 'Amazon.eg')], F.PAGES);
+  assert.equal(p.status, 'verified');
+  assert.equal(p.verified_product_url, url);
+  assert.equal(p.verified_price, 32999, 'the page price (verified) wins over the listing');
+  assert.equal(p.verified_retailer, 'Amazon Egypt');
+  assert.equal(p.country, 'EG');
+  assert.equal(p.currency, 'EGP');
+  assert.equal(snapshot.products.length, 1);
+  assert.equal(snapshot.offers[0].url, url);
+  assert.equal(validateSnapshot(snapshot).ok, true);
+});
+
+test('UAE listing rejected: wrong country, not rankable', async () => {
+  const url = 'https://www.amazon.ae/dp/B0IDEAPAD3';
+  const { p, snapshot, unrankable } = await run(NO_URL, [listing(IDEAPAD_TITLE, url, 'AED 2,499.00', 'Amazon.ae')], { [url]: '<title>Lenovo IdeaPad Slim 3 15IAH8</title>' });
+  assert.equal(p.status, 'discovered_unverified');
+  assert.equal(p.exclusion_reason, 'wrong_country');
+  assert.equal(snapshot.products.length, 0);
+  assert.equal(unrankable[0].reason, 'wrong_country');
+  const noonUae = await run({ ...F.X, offers: [{ retailer: 'Noon', url: 'https://www.noon.com/uae-en/ideapad/N70012345V/p/', price_egp: 33000 }] });
+  assert.equal(noonUae.p.exclusion_reason, 'wrong_country');
+});
+
+test('Saudi listing rejected: wrong country, not rankable', async () => {
+  const url = 'https://www.jarir.com/sa-en/lenovo-ideapad-slim-3-15iah8-i5-12450h-16gb-512gb-123456.html';
+  const { p, snapshot } = await run(NO_URL, [listing(IDEAPAD_TITLE, url, 'SAR 2,899.00', 'Jarir')]);
+  assert.equal(p.exclusion_reason, 'wrong_country');
+  assert.equal(snapshot.offers.length, 0);
+  const noonKsa = await run({ ...F.X, offers: [{ retailer: 'Noon', url: 'https://www.noon.com/saudi-en/ideapad/N70012345V/p/', price_egp: 33000 }] });
+  assert.equal(noonKsa.p.exclusion_reason, 'wrong_country');
+});
+
+test('manufacturer page is evidence only: supports the specs, never an offer', async () => {
+  const url = 'https://www.lenovo.com/us/en/p/laptops/ideapad/ideapad-slim-3-15iah8-i5-12450h-16gb-512gb/82xb0005us';
+  const { p, snapshot } = await run(NO_URL, [listing(IDEAPAD_TITLE, url, '$549.99', 'Lenovo', 'web')]);
+  assert.equal(p.status, 'discovered_unverified');
+  assert.equal(p.exclusion_reason, 'manufacturer_evidence_only');
+  assert.equal(p.verification_status, 'evidence_only');
+  assert.ok(p.evidence_sources.some((e) => e.type === 'manufacturer_specs'));
+  assert.equal(snapshot.products.length, 0);
+});
+
+test('category page rejected even on an Egyptian retailer', async () => {
+  const url = 'https://btech.com/en/laptops/c/lenovo';
+  const { p, snapshot } = await run(NO_URL, [listing(IDEAPAD_TITLE, url, 'EGP 32,999.00', 'B.TECH')], { [url]: `<title>${IDEAPAD_TITLE}</title>` });
+  assert.equal(p.exclusion_reason, 'category_or_search_page');
+  assert.equal(snapshot.products.length, 0);
+});
+
+test('Google search URL rejected, and never used as a fallback link', async () => {
+  const g = 'https://www.google.com/search?q=Lenovo+IdeaPad+Slim+3+15IAH8+egypt';
+  const { p, snapshot, unrankable } = await run({ ...F.X, offers: [{ retailer: 'Google', url: g, price_egp: 33000 }] });
+  assert.equal(p.status, 'discovered_unverified');
+  assert.ok(['category_or_search_page', 'no_direct_url'].includes(p.exclusion_reason), p.exclusion_reason);
+  assert.equal(snapshot.offers.length, 0);
+  assert.equal(unrankable.length, 1);
+  assert.equal(p.verified_product_url, null);
+});
+
+test('no direct URL: an LLM price and retailer alone are claims, the product is not rankable', async () => {
+  const { p, snapshot, unrankable } = await run(NO_URL);
+  assert.equal(p.status, 'discovered_unverified');
+  assert.equal(p.exclusion_reason, 'no_direct_url');
+  assert.equal(p.llm_claimed_price, 33000, 'the claim is kept for research');
+  assert.equal(p.llm_claimed_retailer, 'B.TECH');
+  assert.equal(p.verified_price, null);
+  assert.equal(snapshot.products.length, 0);
+  assert.equal(snapshot.offers.length, 0);
+  assert.equal(unrankable.length, 1);
+});
+
+test('LLM URL on an Egyptian product page: the LLM price is never used, only the page price', async () => {
+  const url = 'https://www.amazon.eg/dp/B0IDEAPAD3';
+  const { p } = await run({ ...F.X, price_egp: 21000, offers: [{ retailer: 'Amazon Egypt', url, price_egp: 21000 }] }, [], F.PAGES);
+  assert.equal(p.status, 'verified');
+  assert.equal(p.verified_price, 32999);
+  assert.equal(p.llm_claimed_price, 21000);
+  const noPrice = await run({ ...F.X, offers: [{ retailer: 'Amazon Egypt', url, price_egp: 33000 }] }, [], { [url]: `<title>${IDEAPAD_TITLE}</title>` });
+  assert.equal(noPrice.p.status, 'discovered_unverified', 'an LLM price never fills a missing page price');
+  assert.equal(noPrice.p.exclusion_reason, 'no_egyptian_price');
+});
+
+test('wrong MPN does not verify', async () => {
+  const cand = { ...F.X, mpn: '82XB0005ED', offers: [] };
+  const url = 'https://www.amazon.eg/dp/B0OTHERMPN';
+  const { p, snapshot } = await run(cand, [{ ...listing(`${IDEAPAD_TITLE} 82XB0009ED`, url, 'EGP 31,999.00', 'Amazon.eg'), for_key: null }]);
+  assert.notEqual(p.status, 'verified');
+  assert.equal(snapshot.products.length, 0);
+  // searched for this exact candidate: the conflict is reported as a variant mismatch
+  const products = consolidate([norm(cand, 'gemini')], ['gemini']);
+  collectOffers(products, [{ ...listing(`${IDEAPAD_TITLE} 82XB0009ED`, url, 'EGP 31,999.00'), for_key: products[0].key }]);
+  await verifyOffers(products, { fetch: F.fakeFetch({}, {}) });
+  assert.equal(products[0].exclusion_reason, 'variant_mismatch');
+});
+
+test('a different GPU variant does not verify', async () => {
+  const cand = { ...F.X, brand: 'Asus', model: 'TUF Gaming F15 FX507ZU4', cpu: 'Intel Core i7-12700H', gpu: 'NVIDIA GeForce RTX 4050', price_egp: 52000, offers: [] };
+  const url = 'https://www.amazon.eg/dp/B0TUFRTX40';
+  const products = consolidate([norm(cand, 'gemini')], ['gemini']);
+  collectOffers(products, [{ ...listing('ASUS TUF Gaming F15 FX507ZU4 Intel Core i7-12700H 16GB 512GB NVIDIA GeForce RTX 4060', url, 'EGP 55,999.00', 'Amazon.eg'), for_key: products[0].key }]);
+  await verifyOffers(products, { fetch: F.fakeFetch({}, {}) });
+  assert.equal(products[0].status, 'discovered_unverified');
+  assert.equal(products[0].exclusion_reason, 'variant_mismatch');
+  assert.ok(products[0].rejections.some((r) => /gpu differs/.test(r.detail)));
+});
+
+test('family-only match (model, no specs) is weak evidence, not an offer', async () => {
+  const url = 'https://www.amazon.eg/dp/B0IDEAFAM1';
+  const { p } = await run(NO_URL, [listing('Lenovo IdeaPad Slim 3 15IAH8', url, 'EGP 30,000.00', 'Amazon.eg')], { [url]: '<title>Lenovo IdeaPad Slim 3</title>' });
+  assert.equal(p.status, 'discovered_unverified');
+  assert.equal(p.exclusion_reason, 'weak_evidence');
+});
+
+test('unreachable and out-of-stock pages do not verify', async () => {
+  const url = 'https://www.amazon.eg/dp/B0IDEAPAD3';
+  const gone = await run(NO_URL, [listing(IDEAPAD_TITLE, url, 'EGP 32,499.00')], {});
+  assert.equal(gone.p.exclusion_reason, 'unreachable');
+  const oos = await run(NO_URL, [listing(IDEAPAD_TITLE, url, 'EGP 32,499.00')], { [url]: `<title>${IDEAPAD_TITLE}</title><body>Currently unavailable. Out of stock</body>` });
+  assert.equal(oos.p.exclusion_reason, 'out_of_stock');
+});
+
+test('classified and comparison listings never sell', async () => {
+  const dub = 'https://www.dubizzle.com.eg/en/ad/lenovo-ideapad-slim-3-15iah8-i5-12450h-ID123456789.html';
+  const a = await run(NO_URL, [listing(IDEAPAD_TITLE, dub, 'EGP 23,000')]);
+  assert.equal(a.p.exclusion_reason, 'classified_listing');
+  const pr = 'https://eg.pricena.com/en/product/lenovo-ideapad-slim-3-15iah8-price-in-egypt-123456';
+  const b = await run(NO_URL, [listing(IDEAPAD_TITLE, pr, 'EGP 31,000')]);
+  assert.equal(b.p.exclusion_reason, 'comparison_site');
+});
+
+// --- snapshot, engine, Top results ---------------------------------------------------------------------------
+
+test('only verified offers reach the engine: every snapshot offer is an Egyptian direct product page with a non-LLM EGP price', async () => {
+  const products = consolidate([norm(F.X, 'a'), norm(F.Y, 'a'), norm(F.Z, 'b'), norm(F.A, 'b'), norm(F.NO_PRICE, 'a'), norm(NO_URL, 'c')], ['a', 'b', 'c']);
+  collectOffers(products, F.EG_LISTINGS);
+  await verifyOffers(products, { fetch: F.fakeFetch({}, F.PAGES) });
+  const { snapshot, index, unrankable } = buildEphemeralSnapshot(products, { configs: F.CONFIGS, category: 'laptop', now: F.NOW });
+  assert.ok(snapshot.offers.length >= 1);
+  for (const o of snapshot.offers) {
+    assert.equal(isEgyptianProductPage(o.url), true, o.url);
+    assert.ok(['listing', 'page'].includes(o.price_source));
+    assert.ok(o.price_egp >= 8000);
+  }
+  for (const p of snapshot.products) assert.equal(index[p.id].status, 'verified');
+  assert.ok(unrankable.every((u) => u.reason));
+  const r = match(F.PROFILE, snapshot, F.NOW, 'rank');
+  for (const pick of r.picks) assert.ok(snapshot.products.some((p) => p.id === pick.product.id));
+  const counts = exclusionCounts(products);
+  assert.ok(Object.values(counts).reduce((a, b) => a + b, 0) === products.filter((p) => p.status !== 'verified').length);
+});
+
+test('observability: every candidate reports discovery, claims, verification and exclusion fields', async () => {
+  const { p } = await run(NO_URL);
+  const row = candidateReport(p);
+  for (const k of ['discovered_by', 'llm_claimed_price', 'llm_claimed_retailer', 'verified_price', 'verified_retailer', 'verified_product_url',
+    'verification_status', 'exclusion_reason', 'country', 'currency', 'variant_match_strength', 'evidence_sources']) assert.ok(k in row, k);
+  assert.deepEqual(row.discovered_by, ['gemini']);
+});
+
+test('fewer than three verified: Top results are not backfilled; zero verified gives the explicit message', async () => {
+  const { topThree } = await import('../worker/expb.js');
+  const products = consolidate([norm(F.X, 'a'), norm(NO_URL, 'b'), norm({ ...F.Y, offers: [] }, 'a')], ['a', 'b']);
+  collectOffers(products, [F.EG_LISTINGS[0]]);
+  await verifyOffers(products, { fetch: F.fakeFetch({}, F.PAGES) });
+  const { snapshot, index } = buildEphemeralSnapshot(products, { configs: F.CONFIGS, category: 'laptop', now: F.NOW });
+  const r = match(F.PROFILE, snapshot, F.NOW, 'rank');
+  const top = topThree(r, snapshot, index);
+  assert.equal(top.length, 1, 'one verified product -> one Top result, no unverified backfill');
+  assert.equal(top[0].verified, true);
+  assert.equal(top[0].verified_product_url, 'https://www.amazon.eg/dp/B0IDEAPAD3');
+
+  const { default: worker } = await import('../worker/index.js');
+  const { createD1 } = await import('./helpers-d1.js');
+  const TOKEN = 'test-admin-token-0123456789abcdef';
+  const env = { DB: createD1(), WISEDO_ADMIN_TOKEN: TOKEN, DISCOVERY_PROVIDERS: 'gemini', GEMINI_API_KEY: 'g', EXPB_RATE_PER_MIN: '100', ASSETS: { fetch: async () => new Response('a') } };
+  const call = async (path, body) => {
+    const res = await worker.fetch(new Request(`https://exp.test${path}`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` }, body: body ? JSON.stringify(body) : undefined }), env);
+    return res.json();
+  };
+  await call('/api/admin/reset');
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = F.fakeFetch({ gemini: F.geminiResponse([NO_URL, { ...F.Y, offers: [{ retailer: 'Google', url: 'https://www.google.com/search?q=victus', price_egp: 39000 }] }]) }, {});
+  let body;
+  try { body = await call('/api/expb/run', { profile: F.PROFILE }); } finally { globalThis.fetch = realFetch; }
+  assert.equal(body.top3.length, 0);
+  assert.equal(body.no_verified_message, 'No sufficiently verified Egyptian product listings were found for this request.');
+  assert.equal(body.unverified_candidates.length, 2);
+  assert.ok(body.unverified_candidates.every((c) => c.exclusion_reason));
+});
+
+// --- Egypt-only market targeting -----------------------------------------------------------------------------
+
+test('every prompt and query targets Egypt and EGP', () => {
+  const req = buildDiscoveryRequest(F.PROFILE, F.laptopConfig);
+  assert.match(req.system, /Egypt/);
+  assert.match(req.system, /EGP/);
+  assert.match(req.user, /Target market: Egypt/);
+  assert.match(req.user, /cairo, Egypt|Egypt nationwide/i);
+  const q = exactQueries({ brand: 'Asus', model: 'TUF Gaming F15 FX507ZC4', mpn: 'FX507ZC4-HN002W', cpu: 'Intel Core i5-12500H', ram_gb: 16, storage_gb: 512 });
+  for (const site of ['btech.com', '2b.com.eg', 'amazon.eg', 'noon.com/egypt-en', 'compumarts.com', 'rayashop.com']) assert.ok(q.sites.includes(site), site);
+  assert.match(q.price, /Egypt|EGP/);
+  assert.match(q.price, /FX507ZC4-HN002W/);
+});
+
+// --- the original engine is untouched ------------------------------------------------------------------------
+
+test('original engine unchanged: Layer 1 and Layer 2 never import the sourcing layer, and match() does not mutate the snapshot', async () => {
+  for (const dir of ['src/layer1', 'src/layer2']) {
+    for (const f of readdirSync(join(ROOT, dir)).filter((x) => x.endsWith('.js'))) {
+      const text = readFileSync(join(ROOT, dir, f), 'utf8');
+      assert.ok(!/sourcing\//.test(text) && !/expb/i.test(text), `${dir}/${f}`);
+    }
+  }
+  const products = consolidate([norm(F.X, 'a'), norm(F.Y, 'a')], ['a']);
+  collectOffers(products, F.EG_LISTINGS);
+  await verifyOffers(products, { fetch: F.fakeFetch({}, F.PAGES) });
+  const { snapshot } = buildEphemeralSnapshot(products, { configs: F.CONFIGS, category: 'laptop', now: F.NOW });
+  const before = JSON.stringify(snapshot);
+  match(F.PROFILE, snapshot, F.NOW, 'rank');
+  assert.equal(JSON.stringify(snapshot), before);
+});

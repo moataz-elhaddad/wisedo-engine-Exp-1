@@ -6,20 +6,20 @@
 //                web / shopping     -> listings for the need (pages, shop listings, EGP prices)
 //     normalise LLM answers (malformed output dropped, never thrown); listings with a full configuration and an
 //     EGP price also become candidates; consolidate conservatively
-//     phase 2  evidence search per top candidate (shopping/web providers), listings matched to candidates
-//     page checks (verify.js) -> verification status + evidence confidence
-//     -> in-memory CatalogSnapshot
+//     phase 2  exact model / MPN searches in Egypt for the top candidates (shopping/web providers)
+//     offers.js: listings and LLM URLs classified (url-classify.js); evidence kept apart from offers; direct Egyptian
+//     product pages checked; VERIFIED offers only (direct URL + EGP price + exact variant + Egyptian retailer)
+//     -> in-memory CatalogSnapshot of verified offers only; everything else is reported as discovered_unverified
 //
 // One failed provider never fails the request; zero usable providers returns ok:false with every reason.
 import { buildDiscoveryRequest } from './discovery-prompt.js';
 import { normalizeProviderOutput } from './normalize.js';
 import { consolidate } from './consolidate.js';
-import { verifyCandidates } from './verify.js';
 import { buildEphemeralSnapshot } from './ephemeral-snapshot.js';
 import { estimateCost, DEFAULT_TIMEOUT_MS } from './providers.js';
 import { SEARCH_PRICES } from './search-providers.js';
 import { parseListing, listingCandidate } from './listings.js';
-import { attachEvidence } from './evidence.js';
+import { collectOffers, verifyOffers, candidateReport, exclusionCounts } from './offers.js';
 import { match } from '../layer2/index.js';
 
 const withDeadline = (promise, ms, label) => {
@@ -72,7 +72,7 @@ export async function runProvider(provider, request, deadlineMs, clock = Date.no
 export function evidenceTargets(products, args, max) {
   const order = [];
   try {
-    const prov = buildEphemeralSnapshot(products, { configs: args.configs, category: args.config.id, now: args.now });
+    const prov = buildEphemeralSnapshot(products, { configs: args.configs, category: args.config.id, now: args.now, mode: 'provisional' });
     if (prov.snapshot.products.length) {
       const r = match(args.profile, prov.snapshot, args.now, 'rank', { maxList: Math.max(max, 10) });
       for (const id of [...r.picks.map((x) => x.product.id), ...r.others.map((x) => x.product.id)]) {
@@ -88,9 +88,9 @@ export function evidenceTargets(products, args, max) {
 }
 
 async function runEvidence(providers, products, opts, deadlineMs, clock, args) {
-  const top = args ? evidenceTargets(products, args, opts.maxCandidates ?? 5) : products.filter((p) => p.signature).slice(0, opts.maxCandidates ?? 5);
+  const top = args ? evidenceTargets(products, args, opts.maxCandidates ?? 6) : products.filter((p) => p.signature).slice(0, opts.maxCandidates ?? 6);
   if (!top.length) return [];
-  return Promise.all(providers.filter((p) => typeof p.evidence === 'function' && (opts.providers || ['serper']).includes(p.name)).map(async (p) => {
+  return Promise.all(providers.filter((p) => typeof p.evidence === 'function' && (opts.providers || ['serper', 'tavily']).includes(p.name)).map(async (p) => {
     const t0 = clock();
     let res;
     try { res = await withDeadline(p.evidence(top), deadlineMs, `${p.name} evidence`); } catch (e) { res = { ok: false, error: String((e && e.message) || e).slice(0, 200) }; }
@@ -117,9 +117,9 @@ export async function discoverProducts(args) {
   const products = consolidate(allCandidates, okRuns.map((r) => r.provider));
   const evidenceRuns = args.evidence && args.evidence.enabled === false ? [] : await runEvidence(args.providers, products, args.evidence || {}, Math.min(deadline, 30_000), clock, args);
   const listings = [...okRuns.flatMap((r) => r.listings), ...evidenceRuns.flatMap((r) => r.listings)];
-  attachEvidence(products, listings);
+  collectOffers(products, listings);
   const tEvidence = clock();
-  const verification = await verifyCandidates(products, { fetch: args.fetch, ...(args.verify || {}) });
+  const verification = await verifyOffers(products, { fetch: args.fetch, ...(args.verify || {}) });
   const built = buildEphemeralSnapshot(products, { configs: args.configs, category: args.config.id, now: args.now, requestId: args.requestId });
   const costs = [...runs, ...evidenceRuns].map((r) => (typeof r.cost_usd === 'number' ? r.cost_usd : 0));
   const total_cost = costs.reduce((a, b) => a + b, 0);
@@ -136,6 +136,7 @@ export async function discoverProducts(args) {
     snapshot: built.snapshot,
     index: built.index,
     unrankable: built.unrankable,
+    candidates_report: products.map((p) => candidateReport(p, Object.keys(built.index).find((id) => built.index[id].key === p.key))),
     metrics: {
       providers_called: runs.length,
       providers_ok: okRuns.length,
@@ -143,7 +144,11 @@ export async function discoverProducts(args) {
       listings: listings.length,
       consolidated: products.length,
       rankable: built.snapshot.products.length,
+      verified_products: products.filter((p) => p.status === 'verified').length,
+      verified_offers: products.reduce((n, p) => n + (p.verified_offers || []).length, 0),
+      excluded_by_reason: exclusionCounts(products),
       urls_checked: verification.checked,
+      evidence_candidates: Math.max(0, ...evidenceRuns.map((r) => r.candidates_searched.length)),
       evidence_searches: evidenceRuns.reduce((s, r) => s + ((r.usage && r.usage.search_calls) || 0), 0),
       discovery_ms: tDiscovery - t0,
       evidence_ms: tEvidence - tDiscovery,

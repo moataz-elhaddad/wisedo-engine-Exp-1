@@ -79,35 +79,54 @@ function showProfile(p) {
   if (p.category !== 'laptop') $('runmsg').innerHTML = '<span class="bad">Experiment B supports laptops only.</span>';
 }
 
-const VSTYLE = { verified: 'ok', listed: 'ok', web_evidence: 'warn', partial: 'ok', unavailable: 'warn', mismatch: 'bad', blocked: 'warn', unreachable: 'warn', error: 'warn', no_url: 'warn', not_checked: 'warn' };
+const VSTYLE = { verified: 'ok', listed: 'ok', evidence_only: 'warn', unverified: 'bad', discovered_unverified: 'warn' };
 const vchip = (s) => `<span class="chip ${VSTYLE[s] || ''}">${esc(s || 'n/a')}</span>`;
+const link = (u, label) => (u ? `<a href="${esc(u)}" target="_blank" rel="noopener">${esc(label || u)}</a>` : '');
+const chips = (xs) => (xs || []).map((x) => `<span class="chip">${esc(x)}</span>`).join('');
+const REASON = {
+  variant_mismatch: 'listing is a different variant (GPU/RAM/storage/CPU/MPN)', out_of_stock: 'out of stock on the product page',
+  unreachable: 'product page unreachable', no_egyptian_price: 'no EGP price on a listing or the page', implausible_price: 'price too low to be this laptop',
+  weak_evidence: 'only the model family matched (variant not confirmed)', wrong_country: 'only found on non-Egyptian stores (UAE / Saudi / global)',
+  classified_listing: 'only classifieds ads (Dubizzle/OLX)', comparison_site: 'only price-comparison pages', manufacturer_evidence_only: 'only the manufacturer spec page',
+  article_evidence_only: 'only articles / reviews', category_or_search_page: 'only category or search pages', no_direct_url: 'no direct Egyptian product URL found',
+};
+const specLine = (c) => [c.cpu, c.ram_gb && c.ram_gb + 'GB RAM', c.storage_gb && c.storage_gb + 'GB', c.gpu, c.display].filter(Boolean).join(' · ');
 
 function showRun(d) {
   $('s4').classList.remove('hidden');
   $('raw').textContent = JSON.stringify(d, null, 2);
   const m = d.metrics || {};
-  $('runmsg').innerHTML = `${d.ok ? '<span class="ok">done</span>' : `<span class="bad">${esc(d.error || 'failed')}</span>`} · ${m.providers_ok ?? 0}/${m.providers_called ?? 0} providers · ${m.raw_candidates ?? 0} raw → ${m.consolidated ?? 0} consolidated (${m.rankable ?? 0} rankable) · ${((m.total_ms || 0) / 1000).toFixed(1)} s · est. $${m.estimated_cost_usd ?? 'n/a'}`;
+  const ex = Object.entries(m.excluded_by_reason || {}).map(([k, v]) => `${esc(k)} ${v}`).join(', ');
+  $('runmsg').innerHTML = `${d.ok ? '<span class="ok">done</span>' : `<span class="bad">${esc(d.error || 'failed')}</span>`} · ${m.providers_ok ?? 0}/${m.providers_called ?? 0} providers · ${m.raw_candidates ?? 0} raw → ${m.consolidated ?? 0} candidates → <b>${m.verified_products ?? 0} verified</b> (${m.verified_offers ?? 0} offers) · excluded: ${ex || 'none'} · ${((m.total_ms || 0) / 1000).toFixed(1)} s · est. $${m.estimated_cost_usd ?? 'n/a'}`;
   $('top3').innerHTML = (d.top3 || []).map((p) => {
     const ds = p.discovery || {};
     const reasons = (p.reasons || []).slice(0, 4).map((r) => `<li>${esc(en(r.text) || en(r) || r.code)}</li>`).join('');
     return `<div class="card"><div class="sub">#${p.rank} · ${esc(p.role)}</div><h3>${esc(p.product.brand)} ${esc(p.product.name)}</h3>
-      <div>${egp(p.price)} at ${esc(p.retailer)} ${p.url ? `· <a href="${esc(p.url)}" target="_blank" rel="noopener">${/google\.com\/search/.test(p.url) ? 'search (no product URL)' : 'product page'}</a>` : ''}</div>
+      <div class="sub">Variant: ${esc(specLine(ds.raw || {}))}${p.mpn ? ` · MPN ${esc(p.mpn)}` : ''} · match: ${esc(p.variant_match_strength || 'n/a')}</div>
+      <div><b>${egp(p.verified_price ?? p.price)}</b> at <b>${esc(p.verified_retailer || p.retailer)}</b></div>
+      <div>${link(p.verified_product_url || p.url, 'Direct product page ↗')}</div>
+      <div>Status: ${vchip(ds.verification_status)} ${p.verified ? '<span class="chip ok">verified Egyptian listing</span>' : ''}</div>
+      <div>Discovered by: ${chips(ds.providers)} consensus ${ds.provider_consensus_score ?? 'n/a'} (signal only)</div>
+      <div class="sub">Evidence: ${chips(ds.evidence_providers) || 'none'} ${(ds.evidence_urls || []).slice(0, 4).map((u, i) => link(u, `src${i + 1}`)).join(' ')}</div>
+      ${ds.llm_claimed_price ? `<div class="sub">LLM claimed ${egp(ds.llm_claimed_price)}${ds.llm_claimed_retailer ? ' at ' + esc(ds.llm_claimed_retailer) : ''} (unverified, not used)</div>` : ''}
       <div class="sub">Engine score ${p.score} (fit ${p.fit}) · ${esc(p.affordability)}</div>
-      <div>Providers: ${(ds.providers || []).map((x) => `<span class="chip">${esc(x)}</span>`).join('')} consensus ${ds.provider_consensus_score ?? 'n/a'}</div>
-      <div>Verification: ${vchip(ds.verification_status)} evidence ${ds.evidence_confidence ?? 'n/a'}</div>
-      <div class="sub">Evidence from: ${(ds.evidence_providers || []).map((x) => `<span class="chip">${esc(x)}</span>`).join('') || 'none'} ${(ds.evidence_urls || []).slice(0, 3).map((u, i) => `<a href="${esc(u)}" target="_blank" rel="noopener">src${i + 1}</a>`).join(' ')}</div>
-      <div class="sub">${esc([ds.raw && ds.raw.cpu, ds.raw && ds.raw.ram_gb && ds.raw.ram_gb + 'GB', ds.raw && ds.raw.storage_gb && ds.raw.storage_gb + 'GB', ds.raw && ds.raw.gpu, ds.raw && ds.raw.display].filter(Boolean).join(' · '))}</div>
-      <b>Why the engine ranked it here</b><ul>${reasons}</ul>
+      <b>Why it matched</b><ul>${reasons}</ul>
       ${(p.notListed || []).length ? `<div class="sub">Not listed (unknown, scored neutral): ${esc(p.notListed.map((x) => en(x.label) || x.id || x).join(', '))}</div>` : ''}</div>`;
-  }).join('') || `<div class="card">No pick. ${esc(en(d.result && d.result.nothingFits && d.result.nothingFits.text))}</div>`;
-  const rows = (d.consolidated || []).map((c) => `<tr><td>${esc(c.key)}</td><td><b>${esc(c.brand)} ${esc(c.model)}</b>${c.mpn ? `<br><span class="sub">${esc(c.mpn)}</span>` : ''}${c.possible_duplicates.length ? `<br><span class="sub warn">similar to ${esc(c.possible_duplicates.join(', '))} (kept separate)</span>` : ''}</td>
-    <td>${esc(c.cpu)}<br>${esc(c.ram_gb)}GB / ${esc(c.storage_gb)}GB<br>${esc(c.gpu)}<br><span class="sub">${esc(c.display)}</span></td>
-    <td>${egp(c.price_egp)}${c.price_range && c.price_range[0] !== c.price_range[1] ? `<br><span class="sub">${egp(c.price_range[0])}–${egp(c.price_range[1])}</span>` : ''}</td>
-    <td>${c.providers.map((x) => `<span class="chip">${esc(x)}</span>`).join('')}<br>${c.provider_count} (${c.provider_consensus_score})</td>
-    <td>${vchip(c.verification_status)}<br>evidence ${c.evidence_confidence}<br>${(c.evidence_providers || []).map((x) => `<span class="chip">${esc(x)}</span>`).join('')}${(c.evidence_urls || []).slice(0, 3).map((u, i) => ` <a href="${esc(u)}" target="_blank" rel="noopener">src${i + 1}</a>`).join('')}</td>
-    <td>${c.offers.map((o) => `${esc(o.retailer || '?')}${o.url ? ` <a href="${esc(o.url)}" target="_blank" rel="noopener">↗</a>` : ''} ${o.price_egp ? egp(o.page_price_egp || o.price_egp) : ''} ${o.verification ? `<span class="sub">${esc(o.verification)}</span>` : ''}`).join('<br>')}</td>
-    <td>${c.product_id ? 'yes' : '<span class="bad">no price</span>'}</td></tr>`).join('');
-  $('cands').innerHTML = `<table><thead><tr><th></th><th>Product</th><th>Specs</th><th>Price</th><th>Found by</th><th>Verification / evidence</th><th>Offers</th><th>Ranked</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }).join('') || `<div class="card"><b>${esc(d.no_verified_message || 'No pick.')}</b> ${esc(en(d.result && d.result.nothingFits && d.result.nothingFits.text))}</div>`;
+  if ((d.top3 || []).length && d.top3.length < 3) $('top3').innerHTML += `<div class="card sub">Only ${d.top3.length} verified product(s) fit. Unverified candidates are never used to fill the list.</div>`;
+  const row = (c) => `<tr><td><b>${esc(c.brand)} ${esc(c.model)}</b>${c.mpn ? `<br><span class="sub">${esc(c.mpn)}</span>` : ''}${(c.possible_duplicates || []).length ? `<br><span class="sub warn">similar to ${esc(c.possible_duplicates.join(', '))} (kept separate)</span>` : ''}</td>
+    <td>${esc(specLine(c.specs || {}))}</td>
+    <td>${chips(c.discovered_by)}<br>${c.provider_count} (${c.provider_consensus_score})</td>
+    <td>${c.llm_claimed_price ? egp(c.llm_claimed_price) : 'n/a'}<br><span class="sub">${esc(c.llm_claimed_retailer || '')}</span></td>
+    <td>${c.verified_price ? `<b>${egp(c.verified_price)}</b><br>${esc(c.verified_retailer)}<br>${link(c.verified_product_url, 'product page ↗')}` : '<span class="bad">none</span>'}</td>
+    <td>${vchip(c.verification_status)}<br>${esc(c.variant_match_strength || '')} ${c.country ? `· ${esc(c.country)} ${esc(c.currency)}` : ''}</td>
+    <td>${c.exclusion_reason ? `<span class="warn">${esc(c.exclusion_reason)}</span><br><span class="sub">${esc(REASON[c.exclusion_reason] || '')}</span>` : '<span class="ok">rankable</span>'}
+      ${(c.rejections || []).length ? `<details><summary>${c.rejections.length} rejected URL(s)</summary>${c.rejections.map((r) => `<div class="sub">${esc(r.reason)} ${link(r.url, (r.url || '').slice(0, 60))} ${esc(r.detail || '')}</div>`).join('')}</details>` : ''}</td>
+    <td>${(c.evidence_sources || []).slice(0, 5).map((e) => `<div class="sub">${esc(e.provider)} · ${esc(e.type)}${e.country ? ' ' + esc(e.country) : ''} ${link(e.url, (e.title || e.url || '').slice(0, 50))}</div>`).join('')}</td></tr>`;
+  const head = '<thead><tr><th>Product</th><th>Specs</th><th>Discovered by</th><th>LLM claim (unverified)</th><th>Verified offer</th><th>Status</th><th>Exclusion</th><th>Evidence</th></tr></thead>';
+  const ver = d.verified_candidates || [], unv = d.unverified_candidates || [];
+  $('cands').innerHTML = `<h3>Verified candidates (${ver.length})</h3><table>${head}<tbody>${ver.map(row).join('')}</tbody></table>`;
+  $('unverified').innerHTML = `<div class="sub">Found by discovery, but no verified Egyptian direct product listing: never ranked, never in the Top results.</div><table>${head}<tbody>${unv.map(row).join('')}</tbody></table>`;
   const prow = (d.providers || []).map((p) => `<tr><td>${esc(p.provider)}<br><span class="sub">${esc(p.role)}</span></td><td>${esc(p.model)}</td><td>${p.ok ? '<span class="ok">ok</span>' : `<span class="bad">${esc(p.error)}</span>`}</td><td>${(p.latency_ms / 1000).toFixed(1)} s</td><td>${p.candidate_count} cand.<br>${p.listing_count || 0} listings</td><td>${p.usage ? (p.role === 'llm' ? `${p.usage.input_tokens} in / ${p.usage.output_tokens} out / ${p.usage.web_searches} searches` : `${p.usage.search_calls} calls / ${p.usage.credits} credits`) : 'n/a'}</td><td>${p.cost_usd != null ? '$' + p.cost_usd : 'n/a'}<br><span class="sub">${esc(p.cost_basis)}</span></td><td class="sub">${esc(p.variant || '')}</td></tr>`).join('');
   const miss = (d.providers_missing || []).map((p) => `<tr><td>${esc(p.name)}</td><td colspan="7" class="bad">not configured: add secret ${esc(p.secret)}</td></tr>`).join('');
   const erow = (d.evidence_runs || []).map((e) => `<tr><td>${esc(e.provider)}<br><span class="sub">evidence</span></td><td></td><td>${e.ok ? '<span class="ok">ok</span>' : `<span class="bad">${esc(e.error)}</span>`}</td><td>${(e.latency_ms / 1000).toFixed(1)} s</td><td>${e.listing_count} listings</td><td>${e.usage ? `${e.usage.search_calls} calls` : ''}</td><td>${e.cost_usd != null ? '$' + e.cost_usd : ''}</td><td class="sub">${esc((e.candidates_searched || []).join(', '))}</td></tr>`).join('');
@@ -124,7 +143,7 @@ $('tile').addEventListener('click', () => { state = null; step({ type: 'start', 
 $('run').addEventListener('click', async () => {
   if (!profile) return;
   $('run').disabled = true;
-  $('runmsg').textContent = 'Asking LLM, web-search and shopping providers (can take up to ~90 s)...';
+  $('runmsg').textContent = 'Asking LLM, web-search and shopping providers, then verifying Egyptian product pages (can take up to ~90 s)...';
   try {
     const { status, data } = await api('/api/expb/run', { profile }, true);
     if (status === 401 || status === 429 || status === 400 || status === 422) $('runmsg').innerHTML = `<span class="bad">${esc(data.error)}</span>`;

@@ -5,7 +5,7 @@
 // filters with their reasons, money, logistics), so the providers see the same need the Recommendation Engine
 // will score against. Free text the buyer typed is not forwarded: only the structured profile.
 
-export const DISCOVERY_PROMPT_VERSION = 'expb-discovery-2';
+export const DISCOVERY_PROMPT_VERSION = 'expb-discovery-3';
 export const MAX_CANDIDATES_PER_PROVIDER = 8;
 
 const nul = (t) => ({ type: [t, 'null'] });
@@ -92,8 +92,9 @@ export function describeNeed(profile, config) {
   else lines.push('- Budget: not stated');
   if (m.pay) lines.push(`- Payment: ${m.pay}${typeof m.monthlyCap === 'number' ? `, max ${m.monthlyCap} EGP/month` : ''}`);
   const l = profile.logistics || {};
-  lines.push(`- Delivery city: ${l.city || 'anywhere in Egypt'}`);
-  if (l.acceptImports !== true) lines.push('- Wants official local warranty (no grey imports)');
+  lines.push('- Target market: Egypt (currency EGP; Egyptian retailers or Egyptian storefronts only)');
+  lines.push(`- Delivery: ${l.city ? `${l.city}, Egypt` : 'Egypt nationwide'}`);
+  if (l.acceptImports !== true) lines.push('- Wants official local Egyptian warranty (no grey imports)');
   if (profile.modelInMind) lines.push(`- Model the buyer mentioned: ${profile.modelInMind}`);
   const must = (profile.must || []).map((f) => en(f.why) || `${f.attr} ${f.op} ${JSON.stringify(f.value)}`);
   const prefer = (profile.prefer || []).map((f) => en(f.why) || `${f.attr} ${f.op} ${JSON.stringify(f.value)}`);
@@ -106,12 +107,18 @@ export function describeNeed(profile, config) {
 }
 
 const SYSTEM = [
-  'You are a product researcher for buyers in Egypt. You suggest specific laptop configurations that a buyer can actually buy in Egypt today.',
+  'You are a product researcher for buyers in EGYPT. You suggest specific laptop configurations that a buyer can actually buy in Egypt today.',
+  'TARGET MARKET (strict):',
+  '- Country: Egypt. Currency: EGP (Egyptian pounds). Prices in any other currency are not acceptable.',
+  '- Availability: the product must realistically be on sale in Egypt now, from Egyptian retailers or the Egyptian storefronts of',
+  '  regional chains: Amazon.eg, Noon Egypt (noon.com/egypt-en), B.TECH, 2B, Raya Shop, Jumia Egypt, Compumarts, Dubai Phone Egypt, El Badr, Sigma.',
+  '- UAE, Saudi, US, global or other-country stores and prices do NOT count as Egyptian availability.',
+  '- When the buyer wants official warranty, prefer models sold with local Egyptian agent warranty (no grey imports).',
   'Rules:',
-  '- Prioritise products sold now by Egyptian retailers (Amazon.eg, Noon Egypt, B.TECH, 2B, Raya Shop, Jumia Egypt, Dubai Phone, Compumarts, El Badr and similar). Prices in EGP.',
   '- Each candidate is ONE exact configuration (CPU, RAM, storage, GPU). Never merge different configurations of a model family into one entry.',
   '- Give the exact model number (MPN) when you know it; otherwise null.',
-  '- Never invent URLs. Give a product URL only when you have seen it or are confident it is the exact product page; otherwise url = null.',
+  '- Never invent URLs. Give a product URL only when it is the exact product page on an Egyptian storefront; otherwise url = null.',
+  '- Prices, retailers and stock you state are treated as unverified hints and will be checked against real Egyptian listings.',
   '- When you are unsure of a fact, use null and lower the confidence. Do not guess specs.',
   '- Respect the hard requirements and the budget ceiling. Suggest between 4 and 8 candidates, best fit first.',
   '- Answer only with the JSON object requested.',
@@ -128,11 +135,14 @@ export function searchQueries(profile, config) {
   const useSlot = (config.slots || []).find((x) => x.id === 'use');
   const uses = useNeed && useSlot ? valueText(useSlot, useNeed.value).toLowerCase() : '';
   const budget = profile.money && typeof profile.money.budget === 'number' ? profile.money.budget : null;
+  const brandBonus = (profile.bonus || []).find((b) => b.attr === 'brand');
+  const brand = brandBonus ? [].concat(brandBonus.value)[0] : '';
+  const gaming = /gaming/i.test(uses) || !!gpu;
   const specs = [ram && `${ram.value}GB RAM`, storage && `${storage.value >= 1024 ? storage.value / 1024 + 'TB' : storage.value + 'GB'} SSD`, gpu && 'RTX',
     os && Array.isArray(os.value) && os.value.includes('macos') ? 'MacBook' : null].filter(Boolean).join(' ');
   return {
-    web: `best laptop ${uses ? 'for ' + uses + ' ' : ''}${specs} ${budget ? `under ${budget} EGP ` : ''}price in Egypt`.replace(/\s+/g, ' ').trim(),
-    shopping: `laptop ${specs}`.replace(/\s+/g, ' ').trim(),
+    web: `best laptop ${uses ? 'for ' + uses + ' ' : ''}${specs} ${budget ? `under ${budget} EGP ` : ''}price in Egypt EGP`.replace(/\s+/g, ' ').trim(),
+    shopping: `${brand} ${gaming ? 'gaming ' : ''}laptop ${specs}`.replace(/\s+/g, ' ').trim(),
     budget,
   };
 }

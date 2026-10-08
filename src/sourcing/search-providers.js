@@ -14,12 +14,28 @@ export const SEARCH_PRICES = {
   serper: { per_call: 0.001, basis: 'Serper ~$1 per 1,000 queries; 2,500 free queries at signup' },
 };
 
-const RETAILER_SITES = ['amazon.eg', 'noon.com', 'btech.com', '2b.com.eg', 'jumia.com.eg', 'rayashop.com'];
+/** Egyptian storefronts searched for exact products (Google site: operators; noon only on its Egypt path). */
+export const EGYPT_SITE_FILTERS = ['btech.com', '2b.com.eg', 'amazon.eg', 'noon.com/egypt-en', 'compumarts.com', 'rayashop.com', 'jumia.com.eg'];
+/** Hosts for Tavily's include_domains (no paths). */
+export const EGYPT_DOMAINS = ['btech.com', '2b.com.eg', 'amazon.eg', 'noon.com', 'compumarts.com', 'rayashop.com', 'jumia.com.eg', 'dubaiphone.net', 'elbadrgroupeg.store', 'sigma-computer.com'];
 
 /** Short spec string for a candidate query: "Lenovo IdeaPad Slim 3 15IAH8 i5-12450H 16GB 512GB". */
 export function candidateQuery(c) {
   const cpu = c.cpu ? String(c.cpu).replace(/intel|amd|core|®|™|processor/gi, '').replace(/\s+/g, ' ').trim() : '';
   return [c.brand, c.model, c.mpn, cpu, c.ram_gb && `${c.ram_gb}GB`, c.storage_gb && (c.storage_gb >= 1024 ? `${c.storage_gb / 1024}TB` : `${c.storage_gb}GB`)].filter(Boolean).join(' ');
+}
+
+/**
+ * Exact-product queries in Egypt for one candidate: brand + model + MPN, restricted to Egyptian storefronts, plus an
+ * "Egypt EGP price" query. The exact model / MPN search is the main verification path (offers.js).
+ */
+export function exactQueries(c) {
+  const name = [c.brand, c.model].filter(Boolean).join(' ');
+  const id = c.mpn ? `"${c.mpn}"` : [c.ram_gb && `${c.ram_gb}GB`, c.storage_gb && (c.storage_gb >= 1024 ? `${c.storage_gb / 1024}TB` : `${c.storage_gb}GB`)].filter(Boolean).join(' ');
+  return {
+    sites: `${name} ${id} (${EGYPT_SITE_FILTERS.map((x) => `site:${x}`).join(' OR ')})`.replace(/\s+/g, ' ').trim(),
+    price: `${name} ${c.mpn || ''} Egypt price EGP`.replace(/\s+/g, ' ').trim(),
+  };
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -46,7 +62,7 @@ export function createTavilyProvider(opts) {
       return { ok: true, listings, usage: { search_calls: 1, credits }, model: `tavily-search:${depth}` };
     },
     async evidence(cands) {
-      const all = (await Promise.all(cands.map(async (c) => (await call(`${candidateQuery(c)} price Egypt`, { max_results: 5 })).map((l) => ({ ...l, for_key: c.key }))))).flat();
+      const all = (await Promise.all(cands.map(async (c) => (await call(exactQueries(c).price, { max_results: 6, include_domains: EGYPT_DOMAINS })).map((l) => ({ ...l, for_key: c.key }))))).flat();
       return { ok: true, listings: all, usage: { search_calls: cands.length, credits: cands.length * credits } };
     },
   };
@@ -76,16 +92,19 @@ export function createSerperProvider(opts) {
   return {
     name: 'serper', role: 'shopping', model: 'serper:google-shopping+search',
     async discover(request) {
-      const sites = RETAILER_SITES.map((s) => `site:${s}`).join(' OR ');
-      const [shop, retail] = await Promise.allSettled([shopping(request.queries.shopping), search(`${request.queries.shopping} (${sites})`)]);
+      const sites = EGYPT_SITE_FILTERS.map((x) => `site:${x}`).join(' OR ');
+      const [shop, retail] = await Promise.allSettled([shopping(`${request.queries.shopping} Egypt`), search(`${request.queries.shopping} price EGP (${sites})`)]);
       if (shop.status === 'rejected' && retail.status === 'rejected') throw shop.reason;
       const listings = [...(shop.status === 'fulfilled' ? shop.value : []), ...(retail.status === 'fulfilled' ? retail.value : [])];
       const errors = [shop, retail].filter((x) => x.status === 'rejected').map((x) => String(x.reason && x.reason.message).slice(0, 160));
       return { ok: true, listings, usage: { search_calls: 2, credits: 2 }, model: 'serper:google-shopping+search', ...(errors.length ? { warnings: errors } : {}) };
     },
     async evidence(cands) {
-      const all = (await Promise.all(cands.map(async (c) => (await search(`${candidateQuery(c)} price Egypt`, 8)).map((l) => ({ ...l, for_key: c.key }))))).flat();
-      return { ok: true, listings: all, usage: { search_calls: cands.length, credits: cands.length } };
+      const all = (await Promise.all(cands.flatMap((c) => {
+        const q = exactQueries(c);
+        return [search(q.sites, 10), search(q.price, 8)].map((pr) => pr.then((ls) => ls.map((l) => ({ ...l, for_key: c.key }))));
+      }))).flat();
+      return { ok: true, listings: all, usage: { search_calls: cands.length * 2, credits: cands.length * 2 } };
     },
   };
 }

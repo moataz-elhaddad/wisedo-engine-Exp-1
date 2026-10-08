@@ -197,6 +197,12 @@ export function listingCandidate(p, now) {
  * rejects the match; a positive match needs the MPN in the text, or most of the model-name tokens.
  * @returns {{match: boolean, strength: 'mpn'|'model+specs'|'model'|null, why: string}}
  */
+function commonPrefix(a, b) {
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  return i;
+}
+
 export function listingMatches(cand, p) {
   if (!p.brand || canonicalBrand(p.brand) !== cand.brand) return { match: false, strength: null, why: 'brand' };
   if (p.ram_gb && cand.ram_gb && p.ram_gb !== cand.ram_gb) return { match: false, strength: null, why: 'ram differs' };
@@ -206,7 +212,14 @@ export function listingMatches(cand, p) {
   const cg = gpuToken(cand.gpu, cand.cpu), pg = gpuToken(p.gpu, p.cpu);
   if (cg && pg && cg !== pg) return { match: false, strength: null, why: 'gpu differs' };
   const flat = lc(`${p.title} ${p.snippet || ''}`).replace(/[^a-z0-9]+/g, '');
-  if (cand.mpn && flat.includes(lc(cand.mpn).replace(/[^a-z0-9]/g, ''))) return { match: true, strength: 'mpn', why: 'MPN in listing' };
+  const mpn = cand.mpn ? lc(cand.mpn).replace(/[^a-z0-9]/g, '') : null;
+  if (mpn && mpn.length >= 6 && !flat.includes(mpn)) {
+    // Another part number of the same family (shared 6+ character prefix) = another variant: never a match.
+    const other = lc(`${p.title} ${p.snippet || ''}`).split(/[\s,;|()/]+/).map((t) => t.replace(/[^a-z0-9]/g, ''))
+      .find((t) => t.length >= 6 && t !== mpn && commonPrefix(t, mpn) >= 6);
+    if (other) return { match: false, strength: null, why: `mpn differs (${other})` };
+  }
+  if (mpn && flat.includes(mpn)) return { match: true, strength: 'mpn', why: 'MPN in listing' };
   const toks = [...modelTokens(cand.model, cand.brand)];
   if (!toks.length) return { match: false, strength: null, why: 'no model tokens' };
   const hit = toks.filter((k) => flat.includes(k)).length / toks.length;

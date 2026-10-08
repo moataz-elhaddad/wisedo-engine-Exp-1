@@ -16,6 +16,7 @@ import { discoverProducts, runProvider } from '../src/sourcing/discover.js';
 import { LLMProductDiscoverySource, recommendWith } from '../src/sourcing/product-source.js';
 import { validateSnapshot } from '../src/contracts.js';
 import { verifyCandidates } from '../src/sourcing/verify.js';
+import { collectOffers, verifyOffers } from '../src/sourcing/offers.js';
 import { buildEphemeralSnapshot } from '../src/sourcing/ephemeral-snapshot.js';
 import { match } from '../src/layer2/index.js';
 import { checkIsolation, loadFiles, parseJsonc, FORBIDDEN } from '../scripts/check-isolation.mjs';
@@ -325,7 +326,8 @@ test('five providers: LLM + web + shopping evidence end to end, the unchanged en
   const d = await discoverProducts({ profile: F.PROFILE, config: F.laptopConfig, configs: F.CONFIGS, now: F.NOW, providers: fiveProviders(f), fetch: f });
   assert.equal(d.ok, true);
   assert.equal(d.metrics.providers_ok, 5);
-  assert.ok(d.metrics.evidence_searches >= 1 && d.metrics.evidence_searches <= 5);
+  assert.ok(d.metrics.evidence_candidates >= 1 && d.metrics.evidence_candidates <= 6);
+  assert.ok(d.metrics.evidence_searches >= d.metrics.evidence_candidates, 'exact-model Egypt queries per candidate');
   const lenovo = d.consolidated.find((c) => c.brand === 'Lenovo' && c.ram_gb === 16);
   assert.deepEqual([...lenovo.providers].sort(), ['cohere', 'gemini', 'groq', 'serper'], 'web pages support, they never "find"');
   assert.ok(lenovo.evidence_providers.includes('tavily'), 'tavily is evidence');
@@ -368,7 +370,7 @@ test('evidence phase can be switched off and is capped per request', async () =>
   assert.equal(off.metrics.evidence_searches, 0);
   const f2 = F.fakeFetch(routes(), F.PAGES);
   const capped = await discoverProducts({ profile: F.PROFILE, config: F.laptopConfig, configs: F.CONFIGS, now: F.NOW, providers: fiveProviders(f2), fetch: f2, evidence: { maxCandidates: 2 } });
-  assert.equal(capped.metrics.evidence_searches, 2);
+  assert.equal(capped.metrics.evidence_candidates, 2);
 });
 
 test('Gemini stays a valid member of the new mix (grounded LLM)', async () => {
@@ -431,8 +433,10 @@ test('model fallback also moves on when a model is overloaded (503)', async () =
 test('Top 3 continues down the engine ranked list when it names fewer than three roles (order unchanged)', async () => {
   const { topThree } = await import('../worker/expb.js');
   const products = consolidate([norm(F.X, 'a'), norm(F.Y, 'a'), norm(F.Z, 'a')], ['a']);
-  await verifyCandidates(products, { enabled: false });
+  collectOffers(products, F.EG_LISTINGS);
+  await verifyOffers(products, { fetch: F.fakeFetch({}, F.PAGES) });
   const { snapshot, index } = buildEphemeralSnapshot(products, { configs: F.CONFIGS, category: 'laptop', now: F.NOW });
+  assert.equal(snapshot.products.length, 3);
   const r = match(F.PROFILE, snapshot, F.NOW, 'rank');
   const two = { ...r, picks: r.picks.slice(0, 1) };
   const top = topThree(two, snapshot, index);
