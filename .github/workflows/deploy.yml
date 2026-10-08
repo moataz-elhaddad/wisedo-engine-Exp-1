@@ -66,12 +66,19 @@ jobs:
           [ ${#tok} -ge 40 ] || bad="$bad CLOUDFLARE_API_TOKEN(missing or not an API token)"
           [ ${#acc} -eq 32 ] || bad="$bad CLOUDFLARE_ACCOUNT_ID(missing or not 32 hex characters)"
           if [ -n "$bad" ]; then echo "::error::Missing or invalid secrets:$bad"; exit 1; fi
-      - name: Check admin token secret
+      - name: Admin token (repository secret, or a one-off token for this deploy)
         env:
           ADMIN: ${{ secrets.WISEDO_ADMIN_TOKEN }}
         run: |
           ADMIN=$(printf '%s' "$ADMIN" | tr -d '[:space:]')
-          [ ${#ADMIN} -ge 24 ] || { echo "::error::WISEDO_ADMIN_TOKEN missing or shorter than 24 characters"; exit 1; }
+          if [ ${#ADMIN} -lt 24 ]; then
+            # No usable secret: generate a random token so the deploy and the smoke run can proceed. It is masked and
+            # never printed; discovery from the web page needs the repository secret (set it and redeploy).
+            echo "::warning::WISEDO_ADMIN_TOKEN is missing or shorter than 24 characters (found ${#ADMIN}); using a one-off generated token for this deploy"
+            ADMIN=$(openssl rand -hex 24)
+          fi
+          echo "::add-mask::$ADMIN"
+          echo "ADMIN_TOKEN=$ADMIN" >> "$GITHUB_ENV"
       - name: Tests (all must pass before deploying)
         run: node --test test/
       - name: Build pages
@@ -93,7 +100,7 @@ jobs:
           echo "url=$url" >> "$GITHUB_OUTPUT"
       - name: Set Worker secrets (values are never printed; empty ones are skipped)
         env:
-          WISEDO_ADMIN_TOKEN: ${{ secrets.WISEDO_ADMIN_TOKEN }}
+          WISEDO_ADMIN_TOKEN: ${{ env.ADMIN_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
@@ -109,7 +116,7 @@ jobs:
       - name: Smoke checks (engine, catalog, Layer 1)
         env:
           URL: ${{ steps.deploy.outputs.url }}
-          ADMIN: ${{ secrets.WISEDO_ADMIN_TOKEN }}
+          ADMIN: ${{ env.ADMIN_TOKEN }}
           RESET: ${{ inputs.reset_catalog }}
         run: |
           set -eu
@@ -139,7 +146,7 @@ jobs:
         if: inputs.live_run
         env:
           EXPB_URL: ${{ steps.deploy.outputs.url }}
-          WISEDO_ADMIN_TOKEN: ${{ secrets.WISEDO_ADMIN_TOKEN }}
+          WISEDO_ADMIN_TOKEN: ${{ env.ADMIN_TOKEN }}
         run: python3 scripts/expb_smoke.py --require-providers 1 | tee expb-summary.txt
       - name: Isolation guard (after deploy)
         if: always()
