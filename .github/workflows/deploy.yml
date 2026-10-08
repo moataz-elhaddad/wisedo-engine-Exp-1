@@ -1,4 +1,4 @@
-name: Deploy demo to Cloudflare
+name: Deploy Exp-1 to Cloudflare
 # Manual only. Runs the tests, applies D1 migrations, builds the pages, deploys the Worker, sets the admin token,
 # loads the sample catalog when the store is empty (or when asked), then checks the live API.
 # Repository secrets: CLOUDFLARE_API_TOKEN (Workers Scripts Edit + D1 Edit), CLOUDFLARE_ACCOUNT_ID,
@@ -62,7 +62,7 @@ jobs:
       - name: Install wrangler
         run: npm install --no-audit --no-fund
       - name: Apply D1 migrations (remote)
-        run: npx wrangler d1 migrations apply wisedo-engine-demo --remote
+        run: npx wrangler d1 migrations apply wisedo-engine-exp-1 --remote
       - name: Deploy Worker and pages
         id: deploy
         run: |

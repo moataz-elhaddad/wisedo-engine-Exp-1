@@ -1,7 +1,9 @@
 {
-  // Wisedo engine demo: Layer 1 + Layer 2 API, the try-out page and the SKU page, over one tenant's catalog in D1.
+  // Wisedo engine EXPERIMENT 1 (Project B: multi-LLM product sourcing). Isolated from the original wisedo-engine-demo
+  // Worker and its D1: own Worker name, own D1 database. Never point this file at the original infrastructure.
+  // Layer 1 + Layer 2 API, the try-out page and the SKU page, over one tenant's catalog in D1.
   // Static files come from ./dist, built by `sh web/build.sh dist` (the deploy workflow does it).
-  "name": "wisedo-engine-demo",
+  "name": "wisedo-engine-exp-1",
   "main": "worker/index.js",
   "compatibility_date": "2026-10-01",
   "assets": {
@@ -22,8 +24,8 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "wisedo-engine-demo",
-      "database_id": "1855c8d1-7165-4627-90b5-03ccb7d7f2f7",
+      "database_name": "wisedo-engine-exp-1",
+      "database_id": "f749d540-7fc7-43a2-abbd-abf3e320831e",
       "migrations_dir": "migrations"
     }
   ],
