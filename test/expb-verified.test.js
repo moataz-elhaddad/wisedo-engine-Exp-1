@@ -491,3 +491,16 @@ test('Serper evidence: one family query per product family (what is on sale now)
   assert.match(qs[1], /^Asus ROG Strix G15 laptop price EGP/);
   assert.equal(r.usage.search_calls, 4);
 });
+
+test('page checks go first to products that can fit the budget (an RTX x070 laptop cannot be 40,000 EGP)', async () => {
+  const pages = {};
+  const mk = (model, gpu, url) => ({ ...F.X, brand: 'Asus', model, cpu: 'AMD Ryzen 7 7435HS', gpu, offers: [{ retailer: 'B.TECH', url, price_egp: 39000 }] });
+  const cands = [];
+  for (let i = 0; i < 3; i++) cands.push(norm(mk(`ROG Zephyrus G14 GA40${i}`, 'NVIDIA GeForce RTX 4070', `https://btech.com/en/p/asus-rog-zephyrus-g14-ga40${i}-ryzen-7-rtx-4070`), 'a'));
+  cands.push(norm(mk('TUF Gaming A15 FA506NCR', 'NVIDIA GeForce RTX 3050', 'https://btech.com/en/p/asus-tuf-gaming-a15-fa506ncr-ryzen-7-7435hs-rtx-3050'), 'a'));
+  const products = consolidate(cands, ['a']);
+  collectOffers(products, []);
+  const f = F.fakeFetch({}, pages);
+  await verifyOffers(products, { fetch: f, maxUrls: 1, budget: 40000 });
+  assert.deepEqual(f.calls.map((c) => c.url), ['https://btech.com/en/p/asus-tuf-gaming-a15-fa506ncr-ryzen-7-7435hs-rtx-3050']);
+});

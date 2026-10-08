@@ -132,7 +132,8 @@ export async function discoverProducts(args) {
   products.push(...fromEvidence);
   collectOffers(products, listings);
   const tEvidence = clock();
-  const verification = await verifyOffers(products, { fetch: args.fetch, ...(args.verify || {}) });
+  const budget = (args.profile.derived && args.profile.derived.maxPrice) || (args.profile.money && args.profile.money.budget) || null;
+  const verification = await verifyOffers(products, { fetch: args.fetch, budget, ...(args.verify || {}) });
   const built = buildEphemeralSnapshot(products, { configs: args.configs, category: args.config.id, now: args.now, requestId: args.requestId });
   const costs = [...runs, ...evidenceRuns].map((r) => (typeof r.cost_usd === 'number' ? r.cost_usd : 0));
   const total_cost = costs.reduce((a, b) => a + b, 0);

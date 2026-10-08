@@ -100,8 +100,17 @@ export async function verifyOffers(products, opts = {}) {
   const seen = new Set();
   // Listing-backed leads first (they already carry a price and a variant signal), then LLM URLs.
   // Strong listing leads first (priced, then to be priced by the page), then LLM URLs, then weak listing leads.
+  // Within the budget of page checks: strong listing leads first (priced, then to be priced by the page), then LLM
+  // URLs, then weak leads; products that cannot fit the budget (graphics class floor, or every price hint far above
+  // it) go last. Price hints only order the checks here; they never become an offer price.
+  const budget = opts.budget || null;
   const rank = (o) => (o.via === 'listing' ? (STRONG.has(o.strength) ? (o.listing_price ? 0 : 1) : 3) : 2);
-  const ordered = products.flatMap((p) => (p._potential || []).map((o) => ({ p, o }))).sort((a, b) => rank(a.o) - rank(b.o));
+  const outOfReach = (p, o) => {
+    if (!budget) return 0;
+    const hints = [o.listing_price, p.llm_claimed_price, ...(p.evidence_sources || []).map((e) => (e.currency === 'EGP' ? e.price : null))].filter((x) => x > 0);
+    return priceFloor(p.gpu) > budget * 1.1 || (hints.length && Math.min(...hints) > budget * 1.25) ? 10 : 0;
+  };
+  const ordered = products.flatMap((p) => (p._potential || []).map((o) => ({ p, o, w: rank(o) + outOfReach(p, o) }))).sort((a, b) => a.w - b.w);
   const skipped = [];
   for (const j of ordered) {
     if (opts.enabled === false || jobs.length >= maxUrls || seen.has(j.o.url + '|' + j.p.key)) continue;
