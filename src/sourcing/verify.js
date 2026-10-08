@@ -131,7 +131,7 @@ export function pageOffer(html, url = '') {
     const block = i >= 0 ? html.slice(i, i + 6000) : '';
     const pa = block.match(/(?:apexPriceToPay|priceToPay)[\s\S]{0,400}?class=["']a-offscreen["'][^>]*>\s*(?:EGP|ج\.م\.?)(?:\s|&nbsp;)*([\d,.]+)/);
     const j = html.indexOf('id="availability"');
-    const at = j >= 0 ? html.slice(j, j + 2500).replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ') : '';
+    const at = j >= 0 ? html.slice(j, j + 6000).replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ') : '';
     const availability = /Currently unavailable|غير متوفر/i.test(at) ? 'out_of_stock' : /In Stock|left in stock|متوفر/i.test(at) ? 'in_stock' : null;
     if (pa && num(pa[1])) return { price: num(pa[1]), currency: 'EGP', availability, source: 'amazon-buybox' };
     const near = (needle, n = 260) => { const k = html.indexOf(needle); return k < 0 ? null : html.slice(k, k + n).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').slice(0, 160); };

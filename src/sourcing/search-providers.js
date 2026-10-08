@@ -29,6 +29,15 @@ export function candidateQuery(c) {
  * Exact-product queries in Egypt for one candidate: brand + model + MPN, restricted to Egyptian storefronts, plus an
  * "Egypt EGP price" query. The exact model / MPN search is the main verification path (offers.js).
  */
+/**
+ * The product family without configuration codes: "TUF Gaming A15 (FA506II)" -> "TUF Gaming A15". Searching the
+ * family on Egyptian stores surfaces the variants actually on sale (LLMs often name older configurations).
+ */
+export function familyName(c) {
+  const m = String(c.model || '').replace(/\([^)]*\)/g, ' ').split(/\s+/).filter((w) => w && !/^[A-Z]{1,3}\d{3,}[A-Z0-9-]*$/i.test(w) && !/^\d{4}$/.test(w)).slice(0, 4).join(' ');
+  return `${c.brand || ''} ${m}`.replace(/\s+/g, ' ').trim();
+}
+
 export function exactQueries(c) {
   const name = [c.brand, c.model].filter(Boolean).join(' ');
   const id = c.mpn ? `"${c.mpn}"` : [c.ram_gb && `${c.ram_gb}GB`, c.storage_gb && (c.storage_gb >= 1024 ? `${c.storage_gb / 1024}TB` : `${c.storage_gb}GB`)].filter(Boolean).join(' ');
@@ -107,13 +116,21 @@ export function createSerperProvider(opts) {
       const errors = all.filter((x) => x.status === 'rejected').map((x) => String(x.reason && x.reason.message).slice(0, 160));
       return { ok: true, listings, usage: { search_calls: 3, credits: 3 }, model: 'serper:google-shopping+search', ...(errors.length ? { warnings: errors } : {}) };
     },
-    async evidence(cands) {
-      const all = (await Promise.all(cands.flatMap((c) => {
-        const q = exactQueries(c);
-        // One site-filtered query per candidate: Workers allow ~50 subrequests per run (discovery + evidence + page checks).
-        return [search(q.sites, 10)].map((pr) => pr.then((ls) => ls.map((l) => ({ ...l, for_key: c.key }))));
-      }))).flat();
-      return { ok: true, listings: all, usage: { search_calls: cands.length, credits: cands.length } };
+    async evidence(cands, opts2 = {}) {
+      // Workers allow ~50 subrequests per run (discovery + evidence + page checks): at most `max` queries here.
+      // Family queries first (one per product family, they find what is on sale now), then exact queries.
+      const max = opts2.maxQueries ?? 10;
+      const sites = EGYPT_SITE_FILTERS.map((x) => `site:${x}`).join(' OR ');
+      const jobs = [];
+      const fams = new Set();
+      for (const c of cands) {
+        const f = familyName(c);
+        if (f.split(' ').length >= 2 && !fams.has(f.toLowerCase())) { fams.add(f.toLowerCase()); jobs.push({ q: `${f} laptop price EGP (${sites})`, key: c.key, family: f }); }
+      }
+      for (const c of cands) jobs.push({ q: exactQueries(c).sites, key: c.key });
+      const run = jobs.slice(0, max);
+      const all = (await Promise.all(run.map((j) => search(j.q, 10).then((ls) => ls.map((l) => (j.family ? { ...l, family_search: j.family } : { ...l, for_key: j.key })))))).flat();
+      return { ok: true, listings: all, usage: { search_calls: run.length, credits: run.length } };
     },
   };
 }

@@ -475,3 +475,16 @@ test('live regression: a product URL that now lands on a search-results page is 
   assert.equal(p.status, 'discovered_unverified');
   assert.equal(p.exclusion_reason, 'unreachable');
 });
+
+test('Serper evidence: one family query per product family (what is on sale now), then exact queries, capped for the subrequest budget', async () => {
+  const { createSerperProvider } = await import('../src/sourcing/search-providers.js');
+  const f = F.fakeFetch({ serper_search: () => new Response(JSON.stringify({ organic: [] }), { status: 200 }) });
+  const s = createSerperProvider({ apiKey: 'k', fetch: f });
+  const cands = [{ key: 'c1', brand: 'Asus', model: 'TUF Gaming A15 (FA506II)' }, { key: 'c2', brand: 'Asus', model: 'TUF Gaming A15 FA506IC' }, { key: 'c3', brand: 'Asus', model: 'ROG Strix G15 G513QC' }];
+  const r = await s.evidence(cands, { maxQueries: 4 });
+  const qs = f.calls.map((c) => c.body.q);
+  assert.equal(qs.length, 4);
+  assert.match(qs[0], /^Asus TUF Gaming A15 laptop price EGP \(site:btech\.com/);
+  assert.match(qs[1], /^Asus ROG Strix G15 laptop price EGP/);
+  assert.equal(r.usage.search_calls, 4);
+});
