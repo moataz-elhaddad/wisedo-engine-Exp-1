@@ -20,6 +20,7 @@ import { estimateCost, DEFAULT_TIMEOUT_MS } from './providers.js';
 import { SEARCH_PRICES } from './search-providers.js';
 import { parseListing, listingCandidate } from './listings.js';
 import { attachEvidence } from './evidence.js';
+import { match } from '../layer2/index.js';
 
 const withDeadline = (promise, ms, label) => {
   let timer;
@@ -63,8 +64,31 @@ export async function runProvider(provider, request, deadlineMs, clock = Date.no
 }
 
 /** Phase 2: evidence searches for the top candidates, on every provider that offers evidence(). */
-async function runEvidence(providers, products, opts, deadlineMs, clock) {
-  const top = products.filter((p) => p.signature).slice(0, opts.maxCandidates ?? 5);
+/**
+ * Which candidates deserve the (limited) evidence searches: the ones the unchanged Recommendation Engine would rank
+ * highest on a provisional snapshot (read-only use of match(); the final ranking is computed again afterwards, on the
+ * evidence-enriched snapshot). Falls back to consensus order when the engine ranks nothing.
+ */
+export function evidenceTargets(products, args, max) {
+  const order = [];
+  try {
+    const prov = buildEphemeralSnapshot(products, { configs: args.configs, category: args.config.id, now: args.now });
+    if (prov.snapshot.products.length) {
+      const r = match(args.profile, prov.snapshot, args.now, 'rank', { maxList: Math.max(max, 10) });
+      for (const id of [...r.picks.map((x) => x.product.id), ...r.others.map((x) => x.product.id)]) {
+        const key = prov.index[id] && prov.index[id].key;
+        if (key && !order.includes(key)) order.push(key);
+      }
+    }
+  } catch { /* fall back to consensus order */ }
+  const byKey = new Map(products.map((p) => [p.key, p]));
+  const chosen = order.map((k) => byKey.get(k)).filter(Boolean);
+  for (const p of products) if (!chosen.includes(p)) chosen.push(p);
+  return chosen.filter((p) => p.signature).slice(0, max);
+}
+
+async function runEvidence(providers, products, opts, deadlineMs, clock, args) {
+  const top = args ? evidenceTargets(products, args, opts.maxCandidates ?? 5) : products.filter((p) => p.signature).slice(0, opts.maxCandidates ?? 5);
   if (!top.length) return [];
   return Promise.all(providers.filter((p) => typeof p.evidence === 'function' && (opts.providers || ['serper']).includes(p.name)).map(async (p) => {
     const t0 = clock();
@@ -91,7 +115,7 @@ export async function discoverProducts(args) {
   const tDiscovery = clock();
   const allCandidates = okRuns.flatMap((r) => r.candidates);
   const products = consolidate(allCandidates, okRuns.map((r) => r.provider));
-  const evidenceRuns = args.evidence && args.evidence.enabled === false ? [] : await runEvidence(args.providers, products, args.evidence || {}, Math.min(deadline, 30_000), clock);
+  const evidenceRuns = args.evidence && args.evidence.enabled === false ? [] : await runEvidence(args.providers, products, args.evidence || {}, Math.min(deadline, 30_000), clock, args);
   const listings = [...okRuns.flatMap((r) => r.listings), ...evidenceRuns.flatMap((r) => r.listings)];
   attachEvidence(products, listings);
   const tEvidence = clock();

@@ -435,3 +435,15 @@ test('Top 3 continues down the engine ranked list when it names fewer than three
   assert.ok(top.slice(1).every((t) => t.role === 'ranked' && typeof t.price === 'number' && t.discovery));
   assert.deepEqual(top.map((t) => t.rank), top.map((_, i) => i + 1));
 });
+
+test('evidence searches go to the candidates the unchanged engine would rank highest, not to consensus order', async () => {
+  const { evidenceTargets } = await import('../src/sourcing/discover.js');
+  const pricey = { ...F.X, brand: 'Dell', model: 'XPS 15 9530', cpu: 'Intel Core i7-13700H', gpu: 'NVIDIA GeForce RTX 4060', price_egp: 95000, offers: [{ retailer: 'Amazon Egypt', url: null, price_egp: 95000 }] };
+  // the over-budget XPS has the most providers, so consensus order puts it first
+  const products = consolidate([norm(pricey, 'a'), norm(pricey, 'b'), norm(pricey, 'c'), norm(F.X, 'a'), norm(F.Z, 'b')], ['a', 'b', 'c']);
+  assert.equal(products[0].brand, 'Dell');
+  await verifyCandidates(products, { enabled: false });
+  const targets = evidenceTargets(products, { profile: F.PROFILE, configs: F.CONFIGS, config: F.laptopConfig, now: F.NOW }, 2);
+  assert.equal(targets.length, 2);
+  assert.ok(!targets.some((p) => p.brand === 'Dell'), 'the engine ranks in-budget laptops first, so they get the evidence searches');
+});

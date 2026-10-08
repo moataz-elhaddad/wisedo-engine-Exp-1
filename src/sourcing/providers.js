@@ -15,7 +15,7 @@ import { createTavilyProvider, createSerperProvider } from './search-providers.j
 
 export const DEFAULT_MODELS = {
   // Lists = model fallback order (404 / 429 move on). Chosen from the models the live keys can use (/api/expb/diagnose).
-  gemini: 'gemini-3.7-flash,gemini-3.5-flash,gemini-3.1-flash-lite,gemini-2.5-flash',
+  gemini: 'gemini-3.5-flash,gemini-3.7-flash,gemini-3.1-flash-lite',
   groq: 'openai/gpt-oss-120b,qwen/qwen3.8-27b',
   cohere: 'command-a-plus-05-2026',
   openai: 'gpt-5',
