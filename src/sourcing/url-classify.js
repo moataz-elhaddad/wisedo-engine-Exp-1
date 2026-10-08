@@ -30,6 +30,12 @@ export const EGYPT_RETAILERS = [
   { host: 'egyptlaptop.com', name: 'Egypt Laptop', product: 'slug' },
   { host: 'kimostore.net', name: 'Kimo Store', product: 'slug' },
   { host: 'badrgroup.com', name: 'Badr Group', product: 'slug' },
+  { host: 'elghazawy.com', name: 'El Ghazawy', product: /\/product\/\d+/ },
+  { host: 'games2egypt.com', name: 'Games2Egypt', product: /\/product\/\d+/i },
+  { host: 'abcshop-eg.com', name: 'ABC Shop Egypt', product: /\/shop\/[^/]+$/ },
+  { host: 'oksouq.com', name: 'OK Souq', product: /\/shop\/[^/]+$/ },
+  { host: 'eg.labeb.com', name: 'Labeb Egypt', product: 'slug' },
+  { host: 'elite.com.eg', name: 'Elite', product: /\/product-page\/[^/]+/ },
 ];
 
 const MANUFACTURERS = ['asus.com', 'lenovo.com', 'hp.com', 'dell.com', 'acer.com', 'msi.com', 'apple.com', 'huawei.com', 'samsung.com',

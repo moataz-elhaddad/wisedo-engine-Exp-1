@@ -31,7 +31,7 @@
       "DISCOVERY_EVIDENCE_PROVIDERS": "serper,tavily",
       "DISCOVERY_EVIDENCE_MAX": "6",
       "DISCOVERY_VERIFY": "1",
-      "DISCOVERY_VERIFY_MAX_URLS": "12",
+      "DISCOVERY_VERIFY_MAX_URLS": "16",
       "EXPB_RATE_PER_MIN": "4"
   },
   // Cloudflare Workers AI (free daily allocation, no key).
@@ -65,7 +65,7 @@
       "DISCOVERY_EVIDENCE_PROVIDERS": "serper,tavily",
       "DISCOVERY_EVIDENCE_MAX": "6",
       "DISCOVERY_VERIFY": "1",
-      "DISCOVERY_VERIFY_MAX_URLS": "12",
+      "DISCOVERY_VERIFY_MAX_URLS": "16",
       "EXPB_RATE_PER_MIN": "4"
       },
       "ai": { "binding": "AI" },

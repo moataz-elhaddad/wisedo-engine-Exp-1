@@ -286,3 +286,48 @@ test('original engine unchanged: Layer 1 and Layer 2 never import the sourcing l
   match(F.PROFILE, snapshot, F.NOW, 'rank');
   assert.equal(JSON.stringify(snapshot), before);
 });
+
+// --- broad discovery from real Egyptian listings ----------------------------------------------------------------
+
+test('a web result that is an Egyptian product page with a full configuration and an EGP price becomes a candidate; category pages never do', async () => {
+  const { listingCandidate, parseListing } = await import('../src/sourcing/listings.js');
+  const web = (url) => ({ provider: 'serper', kind: 'web', title: 'ASUS TUF Gaming A15 FA506NCR Ryzen 7 7435HS 16GB 512GB SSD RTX 3050 4GB', url, snippet: 'Price EGP 38,999.00', price_text: 'EGP 38,999.00' });
+  const ok = listingCandidate(parseListing(web('https://www.amazon.eg/-/en/ASUS-TUF-Gaming-FA506NCR/dp/B0D1234567')), F.NOW);
+  assert.equal(ok.brand, 'Asus');
+  assert.equal(ok.price_egp, 38999);
+  assert.equal(ok.offers[0].url, 'https://www.amazon.eg/-/en/ASUS-TUF-Gaming-FA506NCR/dp/B0D1234567');
+  assert.equal(listingCandidate(parseListing(web('https://btech.com/en/laptops/c/gaming')), F.NOW), null, 'category page');
+  assert.equal(listingCandidate(parseListing(web('https://www.amazon.ae/dp/B0D1234567')), F.NOW), null, 'foreign store');
+  assert.equal(listingCandidate(parseListing({ ...web('https://www.amazon.eg/dp/B0D1234567'), title: 'ASUS TUF Gaming A15 laptop' })), null, 'not a full configuration');
+});
+
+test('evidence searches widen discovery: a real Egyptian listing of another configuration becomes its own candidate', async () => {
+  const { evidenceCandidates } = await import('../src/sourcing/discover.js');
+  const products = consolidate([norm(F.X, 'cohere')], ['cohere']);
+  const runs = [{ listings: [
+    { provider: 'serper', kind: 'web', for_key: products[0].key, title: 'ASUS TUF Gaming F15 FX507ZC4 Core i5-12500H 16GB 512GB RTX 3050', url: 'https://www.amazon.eg/-/en/ASUS-TUF-FX507ZC4/dp/B0BTUF5070', price_text: 'EGP 39,500.00' },
+    { provider: 'serper', kind: 'web', for_key: products[0].key, title: IDEAPAD_TITLE, url: 'https://www.amazon.eg/dp/B0IDEAPAD3', price_text: 'EGP 32,499.00' },
+  ] }];
+  const extra = evidenceCandidates(products, runs, F.NOW, ['cohere', 'serper']);
+  assert.equal(extra.length, 1, 'the IdeaPad listing is the existing candidate, not a new one');
+  assert.equal(extra[0].brand, 'Asus');
+  assert.equal(extra[0].found_via, 'evidence_search');
+  assert.match(extra[0].key, /^e\d+$/);
+});
+
+test('prices: glued cents and absurd EGP values are not laptop prices', async () => {
+  const { parsePrice } = await import('../src/sourcing/listings.js');
+  assert.equal(parsePrice('EGP 45,79900').price, 45799);
+  assert.equal(parsePrice('45.799,00 EGP').price, 45799);
+  assert.equal(parsePrice('EGP 4579900').price, null);
+  assert.equal(parsePrice('EGP 45,799.00').price, 45799);
+});
+
+test('model fallback moves on after a timeout or an unusable answer', async () => {
+  const { withModelFallback } = await import('../src/sourcing/providers.js');
+  const answers = { a: { ok: false, error: 'gemini: timeout after 45000 ms' }, b: { ok: false, error: 'groq: answer is not JSON' }, c: { ok: true, output: { candidates: [] } } };
+  const p = withModelFallback(['a', 'b', 'c'], (m) => ({ name: 'x', discover: async () => answers[m] }));
+  const r = await p.discover({});
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.model_attempts.map((x) => x.model), ['a', 'b', 'c']);
+});

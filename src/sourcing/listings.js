@@ -5,6 +5,7 @@
 // rules (no LLM). A listing becomes a stand-alone discovery candidate only when the full configuration
 // (CPU + RAM + storage + GPU) and an EGP price are readable; otherwise it is used as evidence only.
 import { canonicalBrand } from './specs.js';
+import { isEgyptianProductPage } from './url-classify.js';
 import { modelTokens, cpuToken, gpuToken, signature } from './consolidate.js';
 
 /** Egyptian retailers' hosts (also used to decide whether a listing is relevant to Egypt). */
@@ -48,8 +49,12 @@ export function parsePrice(text) {
     const digits = m[1].replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
     // "32,999.00" / "32.999" (thousands dot) / "32999"
     let n;
-    if (/^\d{1,3}(\.\d{3})+$/.test(digits)) n = Number(digits.replace(/\./g, ''));
-    else n = Number(digits.replace(/,/g, ''));
+    const d = digits.replace(/[.,]$/, '');
+    if (/^\d{1,3}(\.\d{3})+$/.test(d)) n = Number(d.replace(/\./g, ''));
+    else if (/^\d{1,3}(,\d{3})*,\d{3}00$/.test(d)) n = Number(d.replace(/,/g, '').slice(0, -2)); // "45,79900": cents glued on
+    else if (/^\d{1,3}(\.\d{3})*,\d{2}$/.test(d)) n = Number(d.replace(/\./g, '').replace(',', '.')); // "45.799,00"
+    else n = Number(d.replace(/,/g, ''));
+    if (cur === 'EGP' && n > MAX_LAPTOP_PRICE_EGP) continue; // a parsing error, not a laptop price
     if (Number.isFinite(n) && n > 0) return { price: Math.round(n), currency: cur };
   }
   return { price: null, currency: null };
@@ -143,6 +148,8 @@ export function parseListing(l) {
 
 /** Below this an "EGP laptop price" is an accessory, an instalment or a parsing error (live check: 1,520 EGP). */
 export const MIN_LAPTOP_PRICE_EGP = 8000;
+/** Above this an "EGP laptop price" is a parsing error (live check: 4,579,900 from "45,799.00"). */
+export const MAX_LAPTOP_PRICE_EGP = 600000;
 
 /**
  * Not a retailer: classifieds / second-hand marketplaces (used or unofficial units) and price-comparison sites
@@ -174,8 +181,11 @@ export function looksLikeProductPage(url) {
  * Web-search pages never become candidates (a category page once did, with a nonsense price): they are evidence only.
  */
 export function listingCandidate(p, now) {
-  if (p.kind !== 'shopping') return null;
+  // Shopping hits, and web hits that are a single product page on an Egyptian store (url-classify.js). Category,
+  // search, article and foreign pages never become candidates (a category page once did, with a nonsense price).
+  if (p.kind !== 'shopping' && !(p.kind === 'web' && isEgyptianProductPage(p.url))) return null;
   if (!p.brand || !p.model || p.price_egp === null || p.price_egp < MIN_LAPTOP_PRICE_EGP) return null;
+  if (p.kind === 'web' && !(p.cpu && p.ram_gb && p.storage_gb)) return null; // a full configuration only
   // Shop titles rarely name integrated graphics. With a laptop CPU named and no dedicated card anywhere in the text,
   // the GPU is taken as integrated (flagged gpu_assumed). Dedicated cards are always named in Egyptian shop titles.
   const dedicatedMentioned = /rtx|gtx|radeon\s*rx|\barc\s*a\d|nvidia|geforce|\bmx\s*\d{3}/i.test(`${p.title} ${p.snippet || ''}`);

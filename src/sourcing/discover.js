@@ -14,7 +14,7 @@
 // One failed provider never fails the request; zero usable providers returns ok:false with every reason.
 import { buildDiscoveryRequest } from './discovery-prompt.js';
 import { normalizeProviderOutput } from './normalize.js';
-import { consolidate } from './consolidate.js';
+import { consolidate, sameProduct } from './consolidate.js';
 import { buildEphemeralSnapshot } from './ephemeral-snapshot.js';
 import { estimateCost, DEFAULT_TIMEOUT_MS } from './providers.js';
 import { SEARCH_PRICES } from './search-providers.js';
@@ -100,6 +100,17 @@ async function runEvidence(providers, products, opts, deadlineMs, clock, args) {
 }
 
 /**
+ * Keep discovery broad: an evidence search for one candidate often returns real Egyptian product pages for other
+ * configurations (the variant actually on sale). A full configuration on an Egyptian product page with an EGP price
+ * becomes a candidate of its own (unless it is already one); it still has to pass the same offer verification.
+ */
+export function evidenceCandidates(products, evidenceRuns, nowIso, providersAsked, max = 12) {
+  const cands = evidenceRuns.flatMap((r) => r.listings).map((l) => listingCandidate(parseListing(l), nowIso)).filter(Boolean)
+    .filter((c) => !products.some((p) => sameProduct(p, c).same));
+  return consolidate(cands, providersAsked).slice(0, max).map((p, i) => ({ ...p, key: `e${i + 1}`, found_via: 'evidence_search' }));
+}
+
+/**
  * @param {{profile: any, config: any, configs: Record<string, any>, now: any, providers: any[], missing?: any[],
  *          fetch?: typeof fetch, verify?: {enabled?: boolean, maxUrls?: number, timeoutMs?: number},
  *          evidence?: {enabled?: boolean, maxCandidates?: number, providers?: string[]},
@@ -117,6 +128,8 @@ export async function discoverProducts(args) {
   const products = consolidate(allCandidates, okRuns.map((r) => r.provider));
   const evidenceRuns = args.evidence && args.evidence.enabled === false ? [] : await runEvidence(args.providers, products, args.evidence || {}, Math.min(deadline, 30_000), clock, args);
   const listings = [...okRuns.flatMap((r) => r.listings), ...evidenceRuns.flatMap((r) => r.listings)];
+  const fromEvidence = evidenceCandidates(products, evidenceRuns, new Date(t0).toISOString(), okRuns.map((r) => r.provider));
+  products.push(...fromEvidence);
   collectOffers(products, listings);
   const tEvidence = clock();
   const verification = await verifyOffers(products, { fetch: args.fetch, ...(args.verify || {}) });
@@ -149,6 +162,7 @@ export async function discoverProducts(args) {
       excluded_by_reason: exclusionCounts(products),
       urls_checked: verification.checked,
       evidence_candidates: Math.max(0, ...evidenceRuns.map((r) => r.candidates_searched.length)),
+      evidence_listing_candidates: fromEvidence.length,
       evidence_searches: evidenceRuns.reduce((s, r) => s + ((r.usage && r.usage.search_calls) || 0), 0),
       discovery_ms: tDiscovery - t0,
       evidence_ms: tEvidence - tDiscovery,

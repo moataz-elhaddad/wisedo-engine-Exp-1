@@ -226,7 +226,7 @@ test('Serper adapter: Google Shopping (gl=eg) plus a search on Egyptian retailer
   assert.equal(r.ok, true);
   assert.equal(r.listings.length, 2);
   assert.equal(r.listings[0].price_text, 'EGP 32,499.00');
-  assert.equal(r.warnings.length, 1);
+  assert.equal(r.warnings.length, 2, "both organic queries failed: warnings, not a failure");
   const shopCall = f.calls.find((c) => c.url.endsWith('/shopping'));
   assert.equal(shopCall.body.gl, 'eg');
   assert.equal(shopCall.headers['x-api-key'], 'srp');
@@ -329,7 +329,7 @@ test('five providers: LLM + web + shopping evidence end to end, the unchanged en
   assert.ok(d.metrics.evidence_candidates >= 1 && d.metrics.evidence_candidates <= 6);
   assert.ok(d.metrics.evidence_searches >= d.metrics.evidence_candidates, 'exact-model Egypt queries per candidate');
   const lenovo = d.consolidated.find((c) => c.brand === 'Lenovo' && c.ram_gb === 16);
-  assert.deepEqual([...lenovo.providers].sort(), ['cohere', 'gemini', 'groq', 'serper'], 'web pages support, they never "find"');
+  assert.deepEqual([...lenovo.providers].sort(), ['cohere', 'gemini', 'groq', 'serper', 'tavily'], 'an Egyptian product page with a full configuration counts as a find');
   assert.ok(lenovo.evidence_providers.includes('tavily'), 'tavily is evidence');
   assert.ok(['verified', 'listed'].includes(lenovo.verification_status));
   assert.ok(lenovo.evidence_confidence >= 0.8);

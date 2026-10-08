@@ -80,7 +80,7 @@ export async function expbRoute(env, request, h, b) {
   if (m === 'GET' && b === 'status') {
     const { available, missing } = providersFromEnv(env);
     return h.json({
-      ok: true, experiment: 'B', categories: EXPB_CATEGORIES,
+      ok: true, mode: 'experiment_b', categories: EXPB_CATEGORIES,
       providers: available.map((p) => ({ name: p.name, role: p.role, model: p.model })), missing,
       experiment: env.EXPERIMENT || null,
       web_search: String(env.DISCOVERY_WEB_SEARCH || '1') !== '0',
@@ -89,8 +89,10 @@ export async function expbRoute(env, request, h, b) {
   }
   if (m === 'GET' && b === 'runs') {
     if (!h.tokenOk(env, request)) throw new h.HttpError(401, 'admin token required');
-    const rows = await env.DB.prepare('SELECT * FROM expb_runs ORDER BY created_at DESC LIMIT 50').all();
-    return h.json(rows.results.map((r) => ({ ...r, profile: JSON.parse(r.profile), providers: JSON.parse(r.providers), top3: JSON.parse(r.top3), catalog_top3: JSON.parse(r.catalog_top3) })));
+    const limit = Math.min(50, Math.max(1, Number(new URL(request.url).searchParams.get('limit')) || 50));
+    const rows = await env.DB.prepare('SELECT * FROM expb_runs ORDER BY created_at DESC LIMIT ?').bind(limit).all();
+    const parse = (x) => (x ? JSON.parse(x) : null);
+    return h.json(rows.results.map((r) => ({ ...r, profile: parse(r.profile), providers: parse(r.providers), top3: parse(r.top3), catalog_top3: parse(r.catalog_top3), candidates: parse(r.candidates), metrics: parse(r.metrics) })));
   }
   if (m === 'GET' && b === 'diagnose') {
     if (!h.tokenOk(env, request)) throw new h.HttpError(401, 'admin token required');
@@ -138,11 +140,11 @@ async function runHandler(env, request, h) {
     status,
     error: meta.error,
     need: meta.request.need,
-    providers: meta.providers,
+    providers: body.compact ? meta.providers.map(({ attempts, ...x }) => x) : meta.providers,
     providers_missing: missing,
     evidence_runs: meta.evidence_runs,
     // compact: the smoke test and slow links skip the full raw provider outputs (they can exceed 100 KB).
-    raw: body.compact ? meta.raw.map(({ raw_output, ...r }) => ({ ...r, listings: (r.listings || []).slice(0, 10) })) : meta.raw,
+    raw: body.compact ? [] : meta.raw,
     queries: meta.request.queries,
     // Per-candidate observability (offers.js candidateReport): LLM claims vs verified listing facts.
     candidates: meta.candidates_report,
@@ -151,7 +153,7 @@ async function runHandler(env, request, h) {
     unrankable: meta.unrankable,
     top3,
     ...(top3.length ? {} : { no_verified_message: 'No sufficiently verified Egyptian product listings were found for this request.' }),
-    result: { status: result.status, others: result.others, warnings: result.warnings, gaveUp: result.gaveUp, nothingFits: result.nothingFits, counts: result.counts, assumptions: result.assumptions, trace: result.trace },
+    result: body.compact ? { status: result.status, counts: result.counts } : { status: result.status, others: result.others, warnings: result.warnings, gaveUp: result.gaveUp, nothingFits: result.nothingFits, counts: result.counts, assumptions: result.assumptions, trace: result.trace },
     catalog: { snapshot_id: catalog.snapshot_id, status: cat.result.status, top3: catalogTop3, note: 'Same NeedProfile, same engine, synthetic demo catalog (comparison only).' },
     notes: [
       'Provider consensus, evidence confidence and verification are metadata; the ranking is the unchanged Recommendation Engine (customer fit, price fit).',

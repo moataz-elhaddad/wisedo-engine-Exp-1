@@ -93,11 +93,17 @@ export function createSerperProvider(opts) {
     name: 'serper', role: 'shopping', model: 'serper:google-shopping+search',
     async discover(request) {
       const sites = EGYPT_SITE_FILTERS.map((x) => `site:${x}`).join(' OR ');
-      const [shop, retail] = await Promise.allSettled([shopping(`${request.queries.shopping} Egypt`), search(`${request.queries.shopping} price EGP (${sites})`)]);
-      if (shop.status === 'rejected' && retail.status === 'rejected') throw shop.reason;
-      const listings = [...(shop.status === 'fulfilled' ? shop.value : []), ...(retail.status === 'fulfilled' ? retail.value : [])];
-      const errors = [shop, retail].filter((x) => x.status === 'rejected').map((x) => String(x.reason && x.reason.message).slice(0, 160));
-      return { ok: true, listings, usage: { search_calls: 2, credits: 2 }, model: 'serper:google-shopping+search', ...(errors.length ? { warnings: errors } : {}) };
+      // Google Shopping is thin for gl=eg; Egyptian retailers' own product pages (organic, site-filtered) carry the
+      // real listings, so two organic queries go there (all Egyptian stores, then the two largest catalogs).
+      const all = await Promise.allSettled([
+        shopping(`${request.queries.shopping} Egypt`),
+        search(`${request.queries.shopping} price EGP (${sites})`, 20),
+        search(`${request.queries.shopping} (site:amazon.eg OR site:noon.com/egypt-en OR site:btech.com)`, 20),
+      ]);
+      if (all.every((x) => x.status === 'rejected')) throw all[0].reason;
+      const listings = all.flatMap((x) => (x.status === 'fulfilled' ? x.value : []));
+      const errors = all.filter((x) => x.status === 'rejected').map((x) => String(x.reason && x.reason.message).slice(0, 160));
+      return { ok: true, listings, usage: { search_calls: 3, credits: 3 }, model: 'serper:google-shopping+search', ...(errors.length ? { warnings: errors } : {}) };
     },
     async evidence(cands) {
       const all = (await Promise.all(cands.flatMap((c) => {

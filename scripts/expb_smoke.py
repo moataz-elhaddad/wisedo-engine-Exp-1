@@ -12,7 +12,7 @@ usage: EXPB_URL=https://... WISEDO_ADMIN_TOKEN=... python3 scripts/expb_smoke.py
   EXPB_EDITS JSON object of Layer 1 chip edits applied after the text, e.g. {"brand":["asus"],"acceptImports":"no"}
 Exit 1 when the run fails, fewer than N providers succeed, or a Top result is not a verified Egyptian product page.
 """
-import json, os, sys, time, urllib.request, urllib.error
+import http.client, json, os, sys, time, urllib.request, urllib.error
 
 URL = os.environ["EXPB_URL"].rstrip("/")
 TOKEN = os.environ.get("WISEDO_ADMIN_TOKEN", "").strip()
@@ -38,6 +38,10 @@ def call(method, path, body=None, auth=False, timeout=60):
             code, raw = r.status, r.read()
     except urllib.error.HTTPError as e:
         code, raw = e.code, e.read()
+    except http.client.IncompleteRead as e:
+        # Long responses through the runner have been cut mid-body; the caller falls back to the stored run log.
+        print(f"response from {path} was cut after {len(e.partial)} bytes")
+        return -1, None
     try:
         return code, json.loads(raw or b"null")
     except Exception:
@@ -84,6 +88,23 @@ print("NeedProfile:", json.dumps({"money": profile["money"], "must": [f.get("att
 t0 = time.time()
 code, run = call("POST", "/api/expb/run", {"profile": profile, "compact": True}, auth=True, timeout=300)
 wall = time.time() - t0
+if code == -1:
+    # The run itself finished on the Worker and was logged: read it back (candidates, metrics, Top results).
+    lcode, logs = call("GET", "/api/expb/runs?limit=1", auth=True)
+    if lcode == 200 and logs:
+        r = logs[0]
+        cands = r.get("candidates") or []
+        run = {"status": r["status"], "error": None, "providers": r["providers"], "metrics": r.get("metrics") or {}, "queries": None, "raw": [],
+               "evidence_runs": [], "candidates": cands, "verified_candidates": [c for c in cands if c.get("status") == "verified"],
+               "unverified_candidates": [c for c in cands if c.get("status") != "verified"],
+               "top3": [{"rank": i + 1, "role": "ranked", "product": t["product"], "score": t["score"], "fit": None, "mpn": t.get("mpn"),
+                         "verified": bool(t.get("verified_product_url")), "verified_price": t.get("verified_price"), "verified_retailer": t.get("verified_retailer"),
+                         "verified_product_url": t.get("verified_product_url"), "variant_match_strength": None, "discovery": {"providers": t.get("providers")}}
+                        for i, t in enumerate(r.get("top3") or [])],
+               "no_verified_message": None if r.get("top3") else "No sufficiently verified Egyptian product listings were found for this request.",
+               "catalog": {"top3": [{"rank": i + 1, **t} for i, t in enumerate(r.get("catalog_top3") or [])]}, "from_run_log": r["id"]}
+        code = 200
+        print("read the run back from the run log:", r["id"])
 json.dump(run, open("expb-run.json", "w"), indent=1)
 print(f"\nexpb run: HTTP {code} in {wall:.1f}s, status {run and run.get('status')}, error {run and run.get('error')}")
 if not run or "providers" not in run:

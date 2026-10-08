@@ -128,7 +128,7 @@ export function withModelFallback(models, make) {
       for (const m of list) {
         res = await make(m).discover(req);
         tried.push({ model: m, ok: !!res.ok, ...(res.ok ? {} : { error: String(res.error || '').slice(0, 160) }) });
-        if (res.ok || !/HTTP (404|429|503)|does not exist|not found|RESOURCE_EXHAUSTED|UNAVAILABLE|high demand|quota/i.test(String(res.error || ''))) break;
+        if (res.ok || !/HTTP (404|429|503)|does not exist|not found|RESOURCE_EXHAUSTED|UNAVAILABLE|high demand|quota|timeout|not JSON|no valid candidates/i.test(String(res.error || ''))) break;
       }
       return { ...res, model_attempts: tried, model: res.model || tried[tried.length - 1].model };
     },
@@ -409,7 +409,7 @@ export function createGroqProvider(opts) {
 
 /** Every provider this module can build: role, secret, factory. Add a provider by adding one row. */
 export const PROVIDER_REGISTRY = {
-  gemini: { role: 'llm', secret: 'GEMINI_API_KEY', make: (o, env) => withModelFallback(modelList(env.GEMINI_DISCOVERY_MODEL || env.GEMINI_MODEL, DEFAULT_MODELS.gemini), (m) => createGeminiProvider({ ...o, model: m })) },
+  gemini: { role: 'llm', secret: 'GEMINI_API_KEY', make: (o, env) => withModelFallback(modelList(env.GEMINI_DISCOVERY_MODEL || env.GEMINI_MODEL, DEFAULT_MODELS.gemini), (m) => createGeminiProvider({ ...o, model: m, timeoutMs: Math.min(o.timeoutMs, 45_000) })) },
   groq: { role: 'llm', secret: 'GROQ_API_KEY', make: (o, env) => withModelFallback(modelList(env.GROQ_DISCOVERY_MODEL, DEFAULT_MODELS.groq), (m) => createGroqProvider({ ...o, model: m, browserSearch: String(env.GROQ_BROWSER_SEARCH || '0') === '1' })) },
   cohere: { role: 'llm', secret: 'COHERE_API_KEY', make: (o, env) => withModelFallback(modelList(env.COHERE_DISCOVERY_MODEL, DEFAULT_MODELS.cohere), (m) => createCohereProvider({ ...o, model: m })) },
   tavily: { role: 'web_search', secret: 'TAVILY_API_KEY', make: (o) => createTavilyProvider({ ...o, timeoutMs: Math.min(o.timeoutMs, 25_000) }) },
