@@ -182,8 +182,14 @@ test('unreachable and out-of-stock pages do not verify', async () => {
   const url = 'https://www.amazon.eg/dp/B0IDEAPAD3';
   const gone = await run(NO_URL, [listing(IDEAPAD_TITLE, url, 'EGP 32,499.00')], {});
   assert.equal(gone.p.exclusion_reason, 'unreachable');
-  const oos = await run(NO_URL, [listing(IDEAPAD_TITLE, url, 'EGP 32,499.00')], { [url]: `<title>${IDEAPAD_TITLE}</title><body>Currently unavailable. Out of stock</body>` });
+  const oos = await run(NO_URL, [listing(IDEAPAD_TITLE, url, 'EGP 32,499.00')], { [url]: `<title>${IDEAPAD_TITLE}</title><script type="application/ld+json">{"@type":"Product","offers":{"@type":"Offer","price":"32999","priceCurrency":"EGP","availability":"https://schema.org/OutOfStock"}}</script>` });
   assert.equal(oos.p.exclusion_reason, 'out_of_stock');
+  const az = await run(NO_URL, [listing(IDEAPAD_TITLE, url, 'EGP 32,499.00')], { [url]: `<title>${IDEAPAD_TITLE}</title><div id="availability"><span>Currently unavailable.</span></div>` });
+  assert.equal(az.p.exclusion_reason, 'out_of_stock', 'Amazon availability block');
+  // live regression: "Sold out" / "Out of stock" in templates and related-product widgets is not this product's stock
+  const tpl = await run(NO_URL, [listing(IDEAPAD_TITLE, url, 'EGP 32,499.00')], { [url]: `<title>${IDEAPAD_TITLE}</title><script>var t={"sold_out":"Sold out","oos":"Out of stock"}</script><script type="application/ld+json">{"@type":"Product","offers":{"@type":"Offer","price":"32999","priceCurrency":"EGP","availability":"http://schema.org/InStock"}}</script><div class="related">Out of stock</div>` });
+  assert.equal(tpl.p.status, 'verified');
+  assert.equal(tpl.p.verified_price, 32999);
 });
 
 test('classified and comparison listings never sell', async () => {

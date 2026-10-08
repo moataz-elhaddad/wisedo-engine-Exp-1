@@ -135,11 +135,15 @@ def cand_line(c):
 print(f"\nverified candidates ({len(run['verified_candidates'])}):")
 for c in run["verified_candidates"]:
     print("  " + cand_line(c))
+    for pc in (c.get("page_checks") or [])[:3]:
+        print(f"      page check {pc.get('status')} HTTP {pc.get('http')} offer {pc.get('offer')} title {str(pc.get('title'))[:70]!r}")
 print(f"\npromising but unverified ({len(run['unverified_candidates'])}):")
 for c in run["unverified_candidates"]:
     print("  " + cand_line(c))
     for r in (c.get("rejections") or [])[:4]:
         print(f"      rejected {r['reason']}: {str(r.get('url'))[:100]} {r.get('detail') or ''}")
+    for pc in (c.get("page_checks") or [])[:3]:
+        print(f"      page check {pc.get('status')} HTTP {pc.get('http')} offer {pc.get('offer')} title {str(pc.get('title'))[:70]!r} {pc.get('error') or ''}")
 print("\nexcluded by reason:", json.dumps(run["metrics"].get("excluded_by_reason")))
 print("\nTOP results (existing Recommendation Engine, verified only):")
 if not run["top3"]:

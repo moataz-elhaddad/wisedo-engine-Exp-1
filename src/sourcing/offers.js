@@ -110,8 +110,10 @@ export async function verifyOffers(products, opts = {}) {
 /** Decide which potential offers are verified; set the candidate's status, exclusion reason and observability. */
 export function decideOffers(p, checkOf) {
   p.verified_offers = [];
+  p.page_checks = [];
   for (const o of p._potential || []) {
     const pc = checkOf(o.url);
+    if (pc) p.page_checks.push({ url: o.url, status: pc.status, http: pc.http ?? null, title: (pc.title || '').slice(0, 120) || null, offer: pc.page_offer || null, ms: pc.ms ?? null, error: pc.error || pc.note || null });
     const reject = (reason, detail) => p.rejections.push({ reason, url: o.url, ...(detail ? { detail } : {}) });
     if (pc && pc.status === 'mismatch') { reject('variant_mismatch', 'page names another product'); continue; }
     if (pc && pc.status === 'unavailable') { reject('out_of_stock'); continue; }
@@ -120,9 +122,11 @@ export function decideOffers(p, checkOf) {
     if (!STRONG.has(o.strength) && !pageStrong) { reject('weak_evidence', o.strength ? `only ${o.strength} matched` : 'page could not confirm the variant'); continue; }
     // A price read from the verified product page itself is the freshest; then the listing; never an LLM claim.
     let price = o.listing_price, priceSource = 'listing';
-    const pagePrice = pc && pc.page_currency === 'EGP' && (pc.page_prices || []).length ? pc.page_prices[0] : null;
+    // The page's own structured offer (verify.js pageOffer); a bare "price" number elsewhere in the page is not used.
+    const po = pc && pc.page_offer;
+    const pagePrice = po && po.price && (po.currency === 'EGP' || (!po.currency && pc.page_currency === 'EGP')) ? po.price : null;
     if (pagePrice && (pageStrong || !(price > 0))) { price = pagePrice; priceSource = 'page'; }
-    if (!(price > 0)) { reject(pc && pc.page_currency && pc.page_currency !== 'EGP' ? 'wrong_country' : 'no_egyptian_price', pc && pc.page_currency ? `page currency ${pc.page_currency}` : null); continue; }
+    if (!(price > 0)) { reject(po && po.currency && po.currency !== 'EGP' ? 'wrong_country' : 'no_egyptian_price', po && po.currency ? `page currency ${po.currency}` : pc ? `page check: ${pc.status}${pc.http ? ' HTTP ' + pc.http : ''}` : 'page not checked'); continue; }
     if (price < MIN_LAPTOP_PRICE_EGP) { reject('implausible_price', `${price} EGP`); continue; }
     const floor = priceFloor(p.gpu);
     if (price < floor && priceSource !== 'page') { reject('implausible_price', `${price} EGP is below ${floor} EGP for ${p.gpu}; not confirmed by the product page`); continue; }
@@ -176,7 +180,7 @@ export function candidateReport(p, productId) {
     evidence_confidence: p.evidence_confidence, exclusion_reason: p.exclusion_reason,
     rejections: dedupeRejections(p.rejections), country: p.country, currency: p.currency,
     variant_match_strength: p.variant_match_strength,
-    evidence_sources: (p.evidence_sources || []).slice(0, 12), fit_reasons: p.fit_reasons, possible_duplicates: p.possible_duplicates,
+    evidence_sources: (p.evidence_sources || []).slice(0, 12), page_checks: p.page_checks || [], fit_reasons: p.fit_reasons, possible_duplicates: p.possible_duplicates,
   };
 }
 

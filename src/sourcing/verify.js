@@ -33,7 +33,6 @@ export function finalStatus(p, pageStatus) {
 }
 
 const CHALLENGE = /captcha|cf-chl|challenge-platform|access denied|are you a robot|verify you are human|bot detection|px-captcha|datadome/i;
-const OUT_OF_STOCK = /out of stock|currently unavailable|sold out|غير متوفر|غير متاح حاليا|نفدت الكمية|نفذت الكمية|"availability"\s*:\s*"(?:https?:\/\/schema\.org\/)?(?:OutOfStock|Discontinued|SoldOut)"/i;
 
 async function readLimited(res, maxBytes) {
   if (!res.body || typeof res.body.getReader !== 'function') return (await res.text()).slice(0, maxBytes);
@@ -73,6 +72,57 @@ export function pageCurrency(html) {
   if (/\bEGP\b|ج\.م|جنيه|E£/.test(html)) return 'EGP';
   if (/\bAED\b|\bSAR\b|US\$|\bUSD\b/.test(html)) return 'OTHER';
   return null;
+}
+
+const num = (v) => {
+  const s = String(v ?? '').replace(/[^\d.,]/g, '');
+  const n = /^\d{1,3}(,\d{3})+(\.\d+)?$/.test(s) || /^\d+(\.\d+)?$/.test(s) ? Number(s.replace(/,/g, '')) : /^\d{1,3}(\.\d{3})+(,\d+)?$/.test(s) ? Number(s.replace(/\./g, '').replace(',', '.')) : NaN;
+  return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
+};
+
+/** Every schema.org Product node in the page's JSON-LD blocks (graphs and arrays flattened). */
+function ldProducts(html) {
+  const out = [];
+  const walk = (x) => {
+    if (!x || typeof x !== 'object') return;
+    if (Array.isArray(x)) { x.forEach(walk); return; }
+    const t = [].concat(x['@type'] || []).map(String);
+    if (t.some((y) => /^(Product|ProductGroup|IndividualProduct)$/i.test(y)) || (!t.length && x.offers)) out.push(x);
+    if (x['@graph']) walk(x['@graph']);
+  };
+  for (const m of html.matchAll(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
+    try { walk(JSON.parse(m[1].trim())); } catch { /* malformed block */ }
+  }
+  return out;
+}
+
+/**
+ * The page's own offer for its main product, from structured data only (JSON-LD Product -> offers, Open Graph /
+ * product meta, microdata). Free text is never read for a price or for stock: "Sold out" / "Out of stock" strings
+ * appear in templates, translations and related-product widgets on in-stock pages (live: 14 false rejections).
+ * @returns {{price: number|null, currency: string|null, availability: 'in_stock'|'out_of_stock'|null, source: string|null}}
+ */
+export function pageOffer(html) {
+  const avail = (v) => (v == null ? null : /InStock|PreOrder|LimitedAvailability|OnlineOnly|InStoreOnly|BackOrder|in stock/i.test(String(v)) ? 'in_stock'
+    : /OutOfStock|SoldOut|Discontinued|out of stock/i.test(String(v)) ? 'out_of_stock' : null);
+  for (const p of ldProducts(html)) {
+    const offers = [].concat(p.offers || []).flatMap((o) => (o && o['@type'] === 'AggregateOffer' ? [{ price: o.lowPrice ?? o.price, priceCurrency: o.priceCurrency, availability: o.availability }, ...[].concat(o.offers || [])] : [o]));
+    const o = offers.find((x) => x && num(x.price ?? (x.priceSpecification && x.priceSpecification.price)));
+    if (o) return { price: num(o.price ?? o.priceSpecification.price), currency: String(o.priceCurrency || (o.priceSpecification && o.priceSpecification.priceCurrency) || '').toUpperCase() || null, availability: avail(o.availability), source: 'json-ld' };
+  }
+  const meta = (prop) => {
+    const m = html.match(new RegExp(`<meta[^>]*(?:property|name)=["']${prop}["'][^>]*content=["']([^"']+)["']`, 'i')) || html.match(new RegExp(`<meta[^>]*content=["']([^"']+)["'][^>]*(?:property|name)=["']${prop}["']`, 'i'));
+    return m ? m[1] : null;
+  };
+  const mp = num(meta('product:price:amount') || meta('og:price:amount'));
+  if (mp) return { price: mp, currency: (meta('product:price:currency') || meta('og:price:currency') || '').toUpperCase() || null, availability: avail(meta('product:availability') || meta('og:availability')), source: 'meta' };
+  const ip = html.match(/itemprop=["']price["'][^>]*content=["']([\d.,]+)["']/i) || html.match(/content=["']([\d.,]+)["'][^>]*itemprop=["']price["']/i);
+  const ic = html.match(/itemprop=["']priceCurrency["'][^>]*content=["']([A-Za-z]{3})["']/i);
+  const ia = html.match(/itemprop=["']availability["'][^>]*(?:href|content)=["']([^"']+)["']/i);
+  if (ip && num(ip[1])) return { price: num(ip[1]), currency: ic ? ic[1].toUpperCase() : null, availability: avail(ia && ia[1]), source: 'microdata' };
+  // Amazon renders stock in its #availability block, not in structured data.
+  const az = html.match(/id=["']availability["'][\s\S]{0,600}?(Currently unavailable|In Stock|غير متوفر حاليًا|متوفر)/i);
+  return { price: null, currency: null, availability: az ? (/unavailable|غير متوفر/i.test(az[1]) ? 'out_of_stock' : 'in_stock') : null, source: az ? 'amazon-availability' : null };
 }
 
 function pageTitle(html) {
@@ -138,8 +188,9 @@ export async function verifyUrl(url, cand, opts = {}) {
     if (!cmp.brand || (cmp.modelShare < 0.4 && !cmp.mpn)) status = 'mismatch';
     else if ((cmp.mpn || cmp.modelShare >= 0.6) && specOk) status = 'verified';
     else status = 'partial';
-    if (status !== 'mismatch' && OUT_OF_STOCK.test(html)) status = 'unavailable';
-    return { url, status, http: res.status, ms: ms(), title, final_url: res.url || url, match: cmp, page_prices: prices, page_currency: pageCurrency(html) };
+    const offer = pageOffer(html);
+    if (status !== 'mismatch' && offer.availability === 'out_of_stock') status = 'unavailable';
+    return { url, status, http: res.status, ms: ms(), title, final_url: res.url || url, match: cmp, page_prices: prices, page_currency: pageCurrency(html), page_offer: offer, bytes: html.length };
   } catch (e) {
     const msg = e && e.name === 'AbortError' ? 'timeout' : String((e && e.message) || e).slice(0, 120);
     return { url, status: msg === 'timeout' ? 'unreachable' : 'error', error: msg, ms: Date.now() - t0 };

@@ -118,7 +118,7 @@ export function fakeFetch(routes = {}, pages = {}) {
 export const PAGES = {
   'https://www.amazon.eg/dp/B0IDEAPAD3': '<html><title>Lenovo IdeaPad Slim 3 15IAH8 Laptop, Intel Core i5-12450H, 16GB RAM, 512GB SSD</title><script type="application/ld+json">{"offers":{"price":"32999","priceCurrency":"EGP"}}</script></html>',
   'https://www.noon.com/egypt-en/ideapad-slim-3/N70012345V/p/': 403,
-  'https://btech.com/en/lenovo-ideapad-slim-3-8gb-512gb': '<html><title>Lenovo IdeaPad Slim 3 8GB 512GB</title><body>Out of stock</body></html>',
+  'https://btech.com/en/lenovo-ideapad-slim-3-8gb-512gb': '<html><title>Lenovo IdeaPad Slim 3 8GB 512GB</title><script type="application/ld+json">{"@type":"Product","offers":{"@type":"Offer","price":"28999","priceCurrency":"EGP","availability":"https://schema.org/OutOfStock"}}</script><body>Out of stock</body></html>',
   'https://2b.com.eg/en/hp-victus-15-fa1xxx-i5-13420h': '<html><title>HP Victus 15 gaming laptop</title><body>RTX 3050</body></html>',
   'https://www.amazon.eg/dp/B0MBAM2XYZ': '<html><title>Samsung Galaxy Tab S9</title></html>',
   'https://www.rayashop.com/en/asus-vivobook-15-x1504va-i7-1355u-16gb-1tb': '<html><title>ASUS Vivobook 15 X1504VA i7-1355U 16GB 1TB</title><body>EGP 36,999</body></html>',
