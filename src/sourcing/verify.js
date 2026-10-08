@@ -136,7 +136,10 @@ export function pageOffer(html, url = '') {
     if (pa && num(pa[1])) return { price: num(pa[1]), currency: 'EGP', availability, source: 'amazon-buybox' };
     const near = (needle, n = 260) => { const k = html.indexOf(needle); return k < 0 ? null : html.slice(k, k + n).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').slice(0, 160); };
     // No featured offer (common for older models): diagnostics only.
-    return { price: null, currency: null, availability, source: availability ? 'amazon-availability' : null, hints: { bytes: html.length, core: block ? block.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').slice(0, 200) : null, availability: at.slice(0, 160) } };
+    const text = (k, n) => (k < 0 ? null : html.slice(k, k + n).replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ').replace(/^[^<]*>/, '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300));
+    const k = html.indexOf('a-price');
+    return { price: null, currency: null, availability, source: availability ? 'amazon-availability' : null,
+      hints: { bytes: html.length, core: text(i, 6000), availability: text(j, 6000), first_a_price: k >= 0 ? html.slice(k - 120, k + 260).replace(/\s+/g, ' ') : null, outOfStock: html.includes('id="outOfStock"'), buybox: html.includes('id="buybox"') } };
   }
   const az = html.match(/id=["']availability["'][\s\S]{0,600}?(Currently unavailable|In Stock|غير متوفر حاليًا|متوفر)/i);
   return { price: null, currency: null, availability: az ? (/unavailable|غير متوفر/i.test(az[1]) ? 'out_of_stock' : 'in_stock') : null, source: az ? 'amazon-availability' : null };
@@ -196,6 +199,11 @@ export async function verifyUrl(url, cand, opts = {}) {
     const title = pageTitle(html);
     if (CHALLENGE.test(html.slice(0, 20000)) && !(title && title.toLowerCase().includes(cand.brand.toLowerCase()))) {
       return { url, status: 'blocked', http: res.status, ms: ms(), title, note: 'challenge page' };
+    }
+    // A removed product often redirects to a search or category page that still names it: that is not its page.
+    const finalUrl = res.url || url;
+    if (/^\s*(search results|نتائج البحث|no results)/i.test(title || '') || (finalUrl !== url && !looksLikeProductPage(finalUrl))) {
+      return { url, status: 'unreachable', http: res.status, ms: ms(), title, final_url: finalUrl, note: 'redirected to a search or category page' };
     }
     const cmp = compareToPage(html, cand);
     const specChecks = Object.values(cmp.specs).filter((v) => v !== null);

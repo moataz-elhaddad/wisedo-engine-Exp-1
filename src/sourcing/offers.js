@@ -123,6 +123,7 @@ export function decideOffers(p, checkOf) {
     if (pc && pc.status === 'mismatch') { reject('variant_mismatch', 'page names another product'); continue; }
     if (pc && pc.status === 'unavailable') { reject('out_of_stock'); continue; }
     if (pc && pc.http && [404, 410].includes(pc.http)) { reject('unreachable', `HTTP ${pc.http}`); continue; }
+    if (pc && pc.status === 'unreachable' && pc.final_url) { reject('unreachable', pc.note || 'redirected away from the product'); continue; }
     const pageStrong = pc && pc.status === 'verified';
     if (!STRONG.has(o.strength) && !pageStrong) { reject('weak_evidence', o.strength ? `only ${o.strength} matched` : 'page could not confirm the variant'); continue; }
     // A price read from the verified product page itself is the freshest; then the listing; never an LLM claim.

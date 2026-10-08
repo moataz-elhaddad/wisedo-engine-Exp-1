@@ -467,3 +467,11 @@ test('a page price above the laptop ceiling is implausible; article slugs are no
   assert.equal(p.exclusion_reason, 'no_egyptian_price');
   assert.notEqual(classifyUrl('https://hw-egypt.com/laptop-price-in-egypt-a-comprehensive-guide-for-2024').type, 'direct_product');
 });
+
+test('live regression: a product URL that now lands on a search-results page is unreachable, not verified', async () => {
+  const url = 'https://2b.com.eg/en/lenovo-ideapad-slim-3-15iah8-i5-12450h-16gb-512gb.html';
+  const page = `<title>Search results for: 'lenovo ideapad slim 3 15iah8 i5 12450h 16gb 512gb'</title><script type="application/ld+json">{"@type":"Product","offers":{"price":"31999","priceCurrency":"EGP"}}</script>`;
+  const { p } = await run(NO_URL, [listing(IDEAPAD_TITLE, url, 'EGP 32,499.00')], { [url]: page });
+  assert.equal(p.status, 'discovered_unverified');
+  assert.equal(p.exclusion_reason, 'unreachable');
+});
