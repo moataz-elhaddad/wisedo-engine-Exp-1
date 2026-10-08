@@ -452,6 +452,9 @@ test('Amazon.eg: the price comes from the buy box and stock from #availability (
   const widget = '<div class="similar"><span class="a-price"><span class="a-offscreen">EGP85,945.43 EGP</span></span></div>';
   const html = `${widget}<div id="corePrice_desktop" class="celwidget"><span class="a-price a-text-price apexPriceToPay" data-a-size="b"><span class="a-offscreen">EGP36,999.00 EGP</span></span></div><div id="availability" data-csa-c-slot-id="availability_feature_div"> <div id="all"><span class="a-size-medium a-color-success"> In Stock </span></div></div>`;
   assert.deepEqual(pageOffer(html, 'https://www.amazon.eg/dp/B0D1234567'), { price: 36999, currency: 'EGP', availability: 'in_stock', source: 'amazon-buybox' });
+  // live shape (amazon.eg, 2026-10-08)
+  const live = `${widget}<div id="corePrice_desktop" class="celwidget"><div class="a-section apex-core-price-identifier"> <span class="a-price aok-align-center apex-pricetopay-value" data-a-size="xl"><span class="a-offscreen">EGP79,999.00</span></span> Buy with installments and pay EGP 2,222.19 for 36 months</div></div><div id="availability"><span>Only 3 left in stock - order soon.</span></div>`;
+  assert.deepEqual(pageOffer(live, 'https://www.amazon.eg/-/en/ASUS-Gaming/dp/B0FYPKB8Q9'), { price: 79999, currency: 'EGP', availability: 'in_stock', source: 'amazon-buybox' });
   const noOffer = pageOffer(`${widget}<div id="corePrice_desktop"></div><div id="availability"><span>Currently unavailable.</span></div>`, 'https://www.amazon.eg/dp/B0D1234567');
   assert.equal(noOffer.price, null, 'a widget price is never the product price');
   assert.equal(noOffer.availability, 'out_of_stock');

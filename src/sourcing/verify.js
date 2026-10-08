@@ -129,7 +129,7 @@ export function pageOffer(html, url = '') {
     // belong to widgets (live: three different G14 listings all showed the same 85,945.43 from one).
     const i = html.indexOf('id="corePrice_desktop"') >= 0 ? html.indexOf('id="corePrice_desktop"') : html.indexOf('id="corePriceDisplay_desktop_feature_div"');
     const block = i >= 0 ? html.slice(i, i + 6000) : '';
-    const pa = block.match(/(?:apexPriceToPay|priceToPay)[\s\S]{0,400}?class=["']a-offscreen["'][^>]*>\s*(?:EGP|ج\.م\.?)(?:\s|&nbsp;)*([\d,.]+)/);
+    const pa = block.match(/(?:apexPriceToPay|priceToPay|apex-pricetopay-value)[\s\S]{0,400}?class=["']a-offscreen["'][^>]*>\s*(?:EGP|ج\.م\.?)(?:\s|&nbsp;)*([\d,.]+)/i);
     const j = html.indexOf('id="availability"');
     const at = j >= 0 ? html.slice(j, j + 6000).replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ') : '';
     const availability = /Currently unavailable|غير متوفر/i.test(at) ? 'out_of_stock' : /In Stock|left in stock|متوفر/i.test(at) ? 'in_stock' : null;
