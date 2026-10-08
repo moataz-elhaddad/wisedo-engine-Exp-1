@@ -144,8 +144,12 @@ export function parseListing(l) {
 /** Below this an "EGP laptop price" is an accessory, an instalment or a parsing error (live check: 1,520 EGP). */
 export const MIN_LAPTOP_PRICE_EGP = 8000;
 
-/** Classifieds / second-hand marketplaces: prices there are for used or unofficial units, never a retail offer. */
-export const CLASSIFIEDS_HOSTS = ['dubizzle.com.eg', 'dubizzle.com', 'olx.com.eg', 'opensooq.com', 'facebook.com', 'hatla2ee.com'];
+/**
+ * Not a retailer: classifieds / second-hand marketplaces (used or unofficial units) and price-comparison sites
+ * (they point at other shops). Their pages are evidence, never a retail offer.
+ */
+export const CLASSIFIEDS_HOSTS = ['dubizzle.com.eg', 'dubizzle.com', 'olx.com.eg', 'opensooq.com', 'facebook.com', 'hatla2ee.com',
+  'pricena.com', 'yaoota.com', 'pricespy.com', 'idealo.com', 'pricerunner.com'];
 export function isClassifieds(url) {
   let h;
   try { h = new URL(url).hostname.replace(/^www\./, '').toLowerCase(); } catch { return false; }

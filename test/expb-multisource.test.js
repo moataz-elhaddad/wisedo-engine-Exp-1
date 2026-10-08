@@ -405,6 +405,8 @@ test('isolation: the guard rejects the original Worker, original D1, catalog res
 test('classifieds and search pages: never an offer, never "verified", their prices are ignored', async () => {
   const { isClassifieds } = await import('../src/sourcing/listings.js');
   assert.equal(isClassifieds('https://www.dubizzle.com.eg/en/electronics/laptop-computers/q-slim-3/'), true);
+  assert.equal(isClassifieds('https://eg.pricena.com/en/product/latitude-5430-price-in-Egypt-36409735'), true, 'price-comparison sites are not retailers');
+  assert.equal(isClassifieds('https://www.amazon.eg/dp/B0ABC'), false);
   assert.equal(looksLikeProductPage('https://www.dubizzle.com.eg/en/electronics/laptop-computers/q-slim-3/'), false);
   const dub = 'https://www.dubizzle.com.eg/en/electronics/laptop-computers/q-slim-3/';
   const pages = { [dub]: '<html><title>Lenovo IdeaPad Slim 3 15IAH8 i5-12450H 16GB 512GB</title><script>{"price":"23000"}</script></html>' };
