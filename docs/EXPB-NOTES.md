@@ -8,7 +8,7 @@ Layer 1 session (unchanged) -> final NeedProfile
   -> LLMProductDiscoverySource (ProductSource)
        phase 1, in parallel, each with a hard deadline:
          gemini   llm         Gemini + Google Search grounding, structured JSON
-         groq     llm         Groq openai/gpt-oss-120b + built-in browser_search (Compound is not on this account)
+         groq     llm         Groq openai/gpt-oss-120b (JSON mode; browser_search opt-in via GROQ_BROWSER_SEARCH=1)
          cohere   llm         Cohere command-a-plus-05-2026, knowledge only (a different model family)
          tavily   web_search  pages about the need (Egypt boost)
          serper   shopping    Google Shopping (gl=eg) + Google results on Egyptian retailers

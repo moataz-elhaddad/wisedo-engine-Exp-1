@@ -16,7 +16,7 @@ import { createTavilyProvider, createSerperProvider } from './search-providers.j
 export const DEFAULT_MODELS = {
   // Lists = model fallback order (404 / 429 move on). Chosen from the models the live keys can use (/api/expb/diagnose).
   gemini: 'gemini-3.5-flash,gemini-3.7-flash,gemini-3.1-flash-lite',
-  groq: 'openai/gpt-oss-120b,qwen/qwen3.8-27b',
+  groq: 'openai/gpt-oss-120b,openai/gpt-oss-20b,qwen/qwen3.8-27b',
   cohere: 'command-a-plus-05-2026',
   openai: 'gpt-5',
   anthropic: 'claude-opus-5-5',
@@ -41,6 +41,7 @@ export const PRICES = {
   'groq/compound': { in: 0.15, out: 0.6, per_search: 0.008, basis: 'paid-equivalent assumption; $0 on the Groq free tier' },
   'groq/compound-mini': { in: 0.15, out: 0.6, per_search: 0.008, basis: 'paid-equivalent assumption; $0 on the Groq free tier' },
   'openai/gpt-oss-120b': { in: 0.15, out: 0.6, per_search: 0.005, basis: 'paid-equivalent assumption; $0 on the Groq free tier' },
+  'openai/gpt-oss-20b': { in: 0.075, out: 0.3, per_search: 0.005, basis: 'paid-equivalent assumption; $0 on the Groq free tier' },
   'qwen/qwen3.8-27b': { in: 0.3, out: 0.6, per_search: 0, basis: 'paid-equivalent assumption; $0 on the Groq free tier' },
   'gemini-3.7-flash': { in: 0.3, out: 2.5, per_search: 0.035, basis: 'paid-equivalent assumption; $0 on the AI Studio free tier' },
   'gemini-3.5-flash': { in: 0.3, out: 2.5, per_search: 0.035, basis: 'paid-equivalent assumption; $0 on the AI Studio free tier' },
@@ -328,13 +329,11 @@ export function createCohereProvider(opts) {
   // JSON mode with the schema in the prompt first (schema-constrained mode produced runaway output in the live
   // check); then strict schema mode, then plain text. A rejected request (400) or a runaway answer (max_tokens)
   // moves on to the next format.
-  // Live runs: with the model's default thinking and a 12k budget, JSON mode answers (~7k tokens incl. thinking);
-  // with thinking disabled it ran away. Thinking-disabled and schema variants remain as fallbacks.
+  // Live runs: unbounded thinking sometimes used the whole output budget (runaway, up to 100 s). Thinking is
+  // capped at 2,048 tokens first; the model default follows. Two attempts at most, to bound latency.
   const variants = [
+    { name: 'json_object+thinking_2k', format: 'object', think: { type: 'enabled', token_budget: 2048 } },
     { name: 'json_object', format: 'object' },
-    { name: 'json_object+no_thinking', format: 'object', noThink: true },
-    { name: 'json_schema', format: 'schema' },
-    { name: 'plain', format: null },
   ];
   return {
     name: 'cohere', role: 'llm', model,
@@ -344,8 +343,8 @@ export function createCohereProvider(opts) {
           model,
           messages: [{ role: 'system', content: req.system }, { role: 'user', content: req.user + (v.format === 'schema' ? '\n\nAnswer with the JSON object only.' : schemaNote(req)) }],
           temperature: 0.2,
-          max_tokens: 12000,
-          ...(v.noThink ? { thinking: { type: 'disabled' } } : {}),
+          max_tokens: 10000,
+          ...(v.think ? { thinking: v.think } : {}),
           ...(v.format === 'schema' ? { response_format: { type: 'json_object', json_schema: stripKeywords(req.schema, ['maxItems', 'description']) } } : {}),
           ...(v.format === 'object' ? { response_format: { type: 'json_object' } } : {}),
         }, timeoutMs, 'cohere');
@@ -376,8 +375,9 @@ export function createGroqProvider(opts) {
   // GPT-OSS models carry Groq's built-in browser_search tool (not combinable with structured output, so the schema
   // goes in the prompt); Compound systems search on their own; other models answer from knowledge in JSON mode.
   const variants = /^openai\/gpt-oss/.test(model)
-    // reasoning_effort low keeps browsing short (the first live run read ~600k tokens of pages at the default).
-    ? [...(search ? [{ name: 'browser_search', tools: [{ type: 'browser_search' }], effort: 'low' }, { name: 'browser_search+default', tools: [{ type: 'browser_search' }] }] : []), { name: 'json_object', json: true }, { name: 'plain' }]
+    // browser_search read ~600k tokens of pages per call in the live runs, beyond the free tier's per-minute token
+    // limits, so it is opt-in (browserSearch / GROQ_BROWSER_SEARCH=1). Default: JSON mode, ~4-5k tokens.
+    ? [...(search && opts.browserSearch ? [{ name: 'browser_search', tools: [{ type: 'browser_search' }], effort: 'low' }] : []), { name: 'json_object', json: true }, { name: 'plain' }]
     : /compound/.test(model)
       ? [{ name: 'search_settings', settings: true }, { name: 'plain' }]
       : [{ name: 'json_object', json: true }, { name: 'plain' }];
@@ -410,7 +410,7 @@ export function createGroqProvider(opts) {
 /** Every provider this module can build: role, secret, factory. Add a provider by adding one row. */
 export const PROVIDER_REGISTRY = {
   gemini: { role: 'llm', secret: 'GEMINI_API_KEY', make: (o, env) => withModelFallback(modelList(env.GEMINI_DISCOVERY_MODEL || env.GEMINI_MODEL, DEFAULT_MODELS.gemini), (m) => createGeminiProvider({ ...o, model: m })) },
-  groq: { role: 'llm', secret: 'GROQ_API_KEY', make: (o, env) => withModelFallback(modelList(env.GROQ_DISCOVERY_MODEL, DEFAULT_MODELS.groq), (m) => createGroqProvider({ ...o, model: m })) },
+  groq: { role: 'llm', secret: 'GROQ_API_KEY', make: (o, env) => withModelFallback(modelList(env.GROQ_DISCOVERY_MODEL, DEFAULT_MODELS.groq), (m) => createGroqProvider({ ...o, model: m, browserSearch: String(env.GROQ_BROWSER_SEARCH || '0') === '1' })) },
   cohere: { role: 'llm', secret: 'COHERE_API_KEY', make: (o, env) => withModelFallback(modelList(env.COHERE_DISCOVERY_MODEL, DEFAULT_MODELS.cohere), (m) => createCohereProvider({ ...o, model: m })) },
   tavily: { role: 'web_search', secret: 'TAVILY_API_KEY', make: (o) => createTavilyProvider({ ...o, timeoutMs: Math.min(o.timeoutMs, 25_000) }) },
   serper: { role: 'shopping', secret: 'SERPER_API_KEY', make: (o) => createSerperProvider({ ...o, timeoutMs: Math.min(o.timeoutMs, 25_000) }) },

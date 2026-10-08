@@ -22,7 +22,8 @@
       // A provider without its secret is skipped and reported. Optional extra adapters: openai, anthropic.
       "DISCOVERY_PROVIDERS": "gemini,groq,cohere,tavily,serper",
       "GEMINI_DISCOVERY_MODEL": "gemini-3.5-flash,gemini-3.7-flash,gemini-3.1-flash-lite",
-      "GROQ_DISCOVERY_MODEL": "openai/gpt-oss-120b,qwen/qwen3.8-27b",
+      "GROQ_DISCOVERY_MODEL": "openai/gpt-oss-120b,openai/gpt-oss-20b,qwen/qwen3.8-27b",
+      "GROQ_BROWSER_SEARCH": "0",
       "COHERE_DISCOVERY_MODEL": "command-a-plus-05-2026",
       "DISCOVERY_WEB_SEARCH": "1",
       "DISCOVERY_TIMEOUT_MS": "90000",
@@ -55,7 +56,8 @@
       // A provider without its secret is skipped and reported. Optional extra adapters: openai, anthropic.
       "DISCOVERY_PROVIDERS": "gemini,groq,cohere,tavily,serper",
       "GEMINI_DISCOVERY_MODEL": "gemini-3.5-flash,gemini-3.7-flash,gemini-3.1-flash-lite",
-      "GROQ_DISCOVERY_MODEL": "openai/gpt-oss-120b,qwen/qwen3.8-27b",
+      "GROQ_DISCOVERY_MODEL": "openai/gpt-oss-120b,openai/gpt-oss-20b,qwen/qwen3.8-27b",
+      "GROQ_BROWSER_SEARCH": "0",
       "COHERE_DISCOVERY_MODEL": "command-a-plus-05-2026",
       "DISCOVERY_WEB_SEARCH": "1",
       "DISCOVERY_TIMEOUT_MS": "90000",

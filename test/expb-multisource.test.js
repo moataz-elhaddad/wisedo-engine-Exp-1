@@ -46,10 +46,12 @@ test('Cohere adapter: v2 chat, JSON mode with the schema in the prompt first, mo
   const f = F.fakeFetch({ cohere: F.cohereResponse([F.X, F.Z]) });
   const r = await createCohereProvider({ apiKey: 'co-SECRET', fetch: f }).discover(REQ);
   assert.equal(r.ok, true);
-  assert.equal(r.variant, 'json_object');
+  assert.equal(r.variant, 'json_object+thinking_2k');
   assert.equal(r.output.candidates.length, 2);
   assert.deepEqual(r.usage, { input_tokens: 3500, output_tokens: 1400, web_searches: 0 });
   const c = f.calls[0];
+  assert.deepEqual(c.body.thinking, { type: 'enabled', token_budget: 2048 }, 'thinking is capped');
+  assert.equal(c.body.max_tokens, 10000);
   assert.equal(c.url, 'https://api.cohere.com/v2/chat');
   assert.equal(c.body.model, 'command-a-plus-05-2026');
   assert.deepEqual(c.body.response_format, { type: 'json_object' });
@@ -59,19 +61,17 @@ test('Cohere adapter: v2 chat, JSON mode with the schema in the prompt first, mo
   assert.ok(!JSON.stringify(r).includes('co-SECRET'));
 });
 
-test('Cohere adapter: runaway output (MAX_TOKENS) moves to the next format and its tokens are still counted', async () => {
-  const f = F.fakeFetch({ cohere: (body) => (!body.thinking
-    ? new Response(JSON.stringify(F.cohereResponse([], { finish_reason: 'MAX_TOKENS', usage: { billed_units: { input_tokens: 400, output_tokens: 8000 } } })), { status: 200 })
+test('Cohere adapter: runaway output (MAX_TOKENS) moves to the next attempt and its tokens are still counted', async () => {
+  const f = F.fakeFetch({ cohere: (body) => (body.thinking
+    ? new Response(JSON.stringify(F.cohereResponse([], { finish_reason: 'MAX_TOKENS', usage: { billed_units: { input_tokens: 400, output_tokens: 10000 } } })), { status: 200 })
     : new Response(JSON.stringify(F.cohereResponse([F.Y])), { status: 200 })) });
   const r = await createCohereProvider({ apiKey: 'k', fetch: f }).discover(REQ);
   assert.equal(r.ok, true);
-  assert.equal(f.calls[0].body.thinking, undefined, 'the model default thinking first');
-  assert.equal(f.calls[0].body.max_tokens, 12000);
-  assert.equal(r.variant, 'json_object+no_thinking');
+  assert.equal(r.variant, 'json_object');
   assert.equal(r.attempts[0].ok, false);
   assert.match(r.attempts[0].error, /runaway/);
-  assert.equal(r.usage.output_tokens, 8000 + 1400, 'the runaway tokens are part of the cost');
-  assert.deepEqual(f.calls[1].body.thinking, { type: 'disabled' });
+  assert.equal(r.usage.output_tokens, 10000 + 1400, 'the runaway tokens are part of the cost');
+  assert.equal(f.calls[1].body.thinking, undefined, 'second attempt uses the model default');
 });
 
 test('Cohere adapter: schema rejected (400) and runaway everywhere end in a reported failure; auth errors are not retried', async () => {
@@ -79,7 +79,7 @@ test('Cohere adapter: schema rejected (400) and runaway everywhere end in a repo
   const cut = await run('MAX_TOKENS');
   assert.equal(cut.ok, false);
   assert.match(cut.error, /max_tokens/);
-  assert.equal(cut.attempts.length, 4);
+  assert.equal(cut.attempts.length, 2, 'two attempts at most');
   assert.ok(cut.usage.output_tokens > 0);
   const prose = await createCohereProvider({ apiKey: 'k', fetch: F.fakeFetch({ cohere: F.cohereResponse([], { message: { content: [{ type: 'text', text: 'Buy the IdeaPad.' }] } }) }) }).discover(REQ);
   assert.equal(prose.ok, false);
@@ -150,26 +150,31 @@ test('Cohere observability: cost estimate uses the command-a-plus row; usage and
 
 // --- Groq ----------------------------------------------------------------------------------------------------
 
-test('Groq adapter (gpt-oss-120b): built-in browser_search tool, JSON asked in the prompt, executed searches counted', async () => {
+test('Groq adapter (gpt-oss-120b): JSON mode by default; built-in browser_search only when switched on', async () => {
   const f = F.fakeFetch({ groq: (body) => new Response(JSON.stringify(F.groqResponse([F.Y], { model: body.model })), { status: 200 }) });
   const r = await createGroqProvider({ apiKey: 'gq', fetch: f }).discover(REQ);
   assert.equal(r.ok, true);
-  assert.equal(r.variant, 'browser_search');
-  assert.equal(f.calls[0].body.reasoning_effort, 'low');
-  assert.equal(r.usage.web_searches, 2);
-  const b = f.calls[0].body;
-  assert.equal(b.model, 'openai/gpt-oss-120b');
-  assert.deepEqual(b.tools, [{ type: 'browser_search' }]);
-  assert.equal(b.response_format, undefined, 'browser search is not combinable with structured output');
-  assert.match(b.messages[1].content, /JSON schema/);
+  assert.equal(r.variant, 'json_object');
+  assert.equal(f.calls[0].body.model, 'openai/gpt-oss-120b');
+  assert.deepEqual(f.calls[0].body.response_format, { type: 'json_object' });
+  assert.equal(f.calls[0].body.tools, undefined);
+  const fs = F.fakeFetch({ groq: (body) => new Response(JSON.stringify(F.groqResponse([F.Y], { model: body.model })), { status: 200 }) });
+  const rs = await createGroqProvider({ apiKey: 'gq', fetch: fs, browserSearch: true }).discover(REQ);
+  assert.equal(rs.variant, 'browser_search');
+  assert.deepEqual(fs.calls[0].body.tools, [{ type: 'browser_search' }]);
+  assert.equal(fs.calls[0].body.reasoning_effort, 'low');
+  assert.equal(fs.calls[0].body.response_format, undefined, 'browser search is not combinable with structured output');
+  assert.equal(rs.usage.web_searches, 2);
+  const env = providersFromEnv({ DISCOVERY_PROVIDERS: 'groq', GROQ_API_KEY: 'k', GROQ_BROWSER_SEARCH: '1' }, { fetch: fs }).available[0];
+  assert.ok(env, 'GROQ_BROWSER_SEARCH=1 switches it on through the registry');
 });
 
-test('Groq adapter: tool rejected (400) retries in JSON mode; Compound models use search_settings; prose fails', async () => {
+test('Groq adapter: browser_search rejected (400) retries in JSON mode; Compound models use search_settings; prose fails', async () => {
   const f = F.fakeFetch({ groq: (body) => (body.tools ? new Response('{"error":{"message":"tools not supported"}}', { status: 400 }) : new Response(JSON.stringify(F.groqResponse([F.X])), { status: 200 })) });
-  const r = await createGroqProvider({ apiKey: 'k', fetch: f }).discover(REQ);
+  const r = await createGroqProvider({ apiKey: 'k', fetch: f, browserSearch: true }).discover(REQ);
   assert.equal(r.ok, true);
   assert.equal(r.variant, 'json_object');
-  assert.deepEqual(f.calls[2].body.response_format, { type: 'json_object' }, 'both browser_search variants were rejected first');
+  assert.deepEqual(f.calls[1].body.response_format, { type: 'json_object' });
   const fc = F.fakeFetch({ groq: F.groqResponse([F.X]) });
   await createGroqProvider({ apiKey: 'k', fetch: fc, model: 'groq/compound' }).discover(REQ);
   assert.deepEqual(fc.calls[0].body.search_settings, { country: 'egypt' });
