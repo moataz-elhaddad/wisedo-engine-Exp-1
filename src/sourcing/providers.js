@@ -14,8 +14,9 @@ import { postJson, ProviderError } from './http.js';
 import { createTavilyProvider, createSerperProvider } from './search-providers.js';
 
 export const DEFAULT_MODELS = {
-  gemini: 'gemini-3.8-flash,gemini-3.8-flash-lite',
-  groq: 'groq/compound,groq/compound-mini,compound-beta,compound-beta-mini',
+  // Lists = model fallback order (404 / 429 move on). Chosen from the models the live keys can use (/api/expb/diagnose).
+  gemini: 'gemini-3.7-flash,gemini-3.5-flash,gemini-3.1-flash-lite,gemini-2.5-flash',
+  groq: 'openai/gpt-oss-120b,qwen/qwen3.8-27b',
   cohere: 'command-a-plus-05-2026',
   openai: 'gpt-5',
   anthropic: 'claude-opus-5-5',
@@ -39,6 +40,12 @@ export const PRICES = {
   'gemini-3.8-flash': { in: 0.3, out: 2.5, per_search: 0.035, basis: 'paid-equivalent assumption; $0 on the AI Studio free tier' },
   'groq/compound': { in: 0.15, out: 0.6, per_search: 0.008, basis: 'paid-equivalent assumption; $0 on the Groq free tier' },
   'groq/compound-mini': { in: 0.15, out: 0.6, per_search: 0.008, basis: 'paid-equivalent assumption; $0 on the Groq free tier' },
+  'openai/gpt-oss-120b': { in: 0.15, out: 0.6, per_search: 0.005, basis: 'paid-equivalent assumption; $0 on the Groq free tier' },
+  'qwen/qwen3.8-27b': { in: 0.3, out: 0.6, per_search: 0, basis: 'paid-equivalent assumption; $0 on the Groq free tier' },
+  'gemini-3.7-flash': { in: 0.3, out: 2.5, per_search: 0.035, basis: 'paid-equivalent assumption; $0 on the AI Studio free tier' },
+  'gemini-3.5-flash': { in: 0.3, out: 2.5, per_search: 0.035, basis: 'paid-equivalent assumption; $0 on the AI Studio free tier' },
+  'gemini-3.1-flash-lite': { in: 0.1, out: 0.4, per_search: 0.035, basis: 'paid-equivalent assumption; $0 on the AI Studio free tier' },
+  'gemini-2.5-flash': { in: 0.3, out: 2.5, per_search: 0.035, basis: 'paid-equivalent assumption; $0 on the AI Studio free tier' },
   'gemini-3.8-flash-lite': { in: 0.1, out: 0.4, per_search: 0.035, basis: 'paid-equivalent assumption; $0 on the AI Studio free tier' },
   'command-a-plus-05-2026': { in: 2.5, out: 10, per_search: 0, basis: 'paid-equivalent assumption (Command A list price); $0 on a Cohere trial key (1,000 calls/month)' },
 };
@@ -283,7 +290,7 @@ export function createGeminiProvider(opts) {
         const output = parseJsonObject(text);
         if (!output) return { ok: false, error: 'gemini: answer is not JSON', stopReason: 'end_turn', model, usage };
         return { ok: true, output, stopReason: 'end_turn', model: `${model}`, usage };
-      });
+      }, (e) => e instanceof ProviderError && (e.status === 400 || e.status === 429));
     },
   };
 }
@@ -320,7 +327,15 @@ export function createCohereProvider(opts) {
   // JSON mode with the schema in the prompt first (schema-constrained mode produced runaway output in the live
   // check); then strict schema mode, then plain text. A rejected request (400) or a runaway answer (max_tokens)
   // moves on to the next format.
-  const variants = [{ name: 'json_object', format: 'object' }, { name: 'json_schema', format: 'schema' }, { name: 'plain', format: null }];
+  // Reasoning-capable Command models think by default and spent the whole output budget on it in the live check:
+  // thinking is switched off first ({type: 'disabled'}); variants without the parameter follow for models that
+  // reject it.
+  const variants = [
+    { name: 'json_object', format: 'object', noThink: true },
+    { name: 'json_object+thinking', format: 'object' },
+    { name: 'json_schema', format: 'schema', noThink: true },
+    { name: 'plain', format: null, noThink: true },
+  ];
   return {
     name: 'cohere', role: 'llm', model,
     async discover(req) {
@@ -329,7 +344,8 @@ export function createCohereProvider(opts) {
           model,
           messages: [{ role: 'system', content: req.system }, { role: 'user', content: req.user + (v.format === 'schema' ? '\n\nAnswer with the JSON object only.' : schemaNote(req)) }],
           temperature: 0.2,
-          max_tokens: 6000,
+          max_tokens: 8000,
+          ...(v.noThink ? { thinking: { type: 'disabled' } } : {}),
           ...(v.format === 'schema' ? { response_format: { type: 'json_object', json_schema: stripKeywords(req.schema, ['maxItems', 'description']) } } : {}),
           ...(v.format === 'object' ? { response_format: { type: 'json_object' } } : {}),
         }, timeoutMs, 'cohere');
@@ -356,7 +372,14 @@ export function createGroqProvider(opts) {
   const model = opts.model || DEFAULT_MODELS.groq.split(',')[0];
   const doFetch = opts.fetch || ((...a) => fetch(...a));
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const variants = [{ name: 'search_settings', settings: true }, { name: 'plain', settings: false }];
+  const search = opts.webSearch !== false;
+  // GPT-OSS models carry Groq's built-in browser_search tool (not combinable with structured output, so the schema
+  // goes in the prompt); Compound systems search on their own; other models answer from knowledge in JSON mode.
+  const variants = /^openai\/gpt-oss/.test(model)
+    ? [...(search ? [{ name: 'browser_search', tools: [{ type: 'browser_search' }] }] : []), { name: 'json_object', json: true }, { name: 'plain' }]
+    : /compound/.test(model)
+      ? [{ name: 'search_settings', settings: true }, { name: 'plain' }]
+      : [{ name: 'json_object', json: true }, { name: 'plain' }];
   return {
     name: 'groq', role: 'llm', model,
     async discover(req) {
@@ -366,7 +389,9 @@ export function createGroqProvider(opts) {
           messages: [{ role: 'system', content: req.system }, { role: 'user', content: req.user + schemaNote(req) }],
           temperature: 0.2,
           max_tokens: 8000,
-          ...(v.settings && opts.webSearch !== false ? { search_settings: { country: 'egypt' } } : {}),
+          ...(v.tools ? { tools: v.tools, tool_choice: 'auto' } : {}),
+          ...(v.json ? { response_format: { type: 'json_object' } } : {}),
+          ...(v.settings && search ? { search_settings: { country: 'egypt' } } : {}),
         }, timeoutMs, 'groq');
         const a = chatAnswer(data);
         const tools = Array.isArray(a.msg.executed_tools) ? a.msg.executed_tools : [];

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import * as F from './expb-fixtures.js';
 import { createCohereProvider, createGroqProvider, createGeminiProvider, providersFromEnv, DEFAULT_PROVIDER_MIX } from '../src/sourcing/providers.js';
 import { createTavilyProvider, createSerperProvider, candidateQuery } from '../src/sourcing/search-providers.js';
-import { parseListing, parsePrice, listingCandidate, listingMatches, isEgyptian } from '../src/sourcing/listings.js';
+import { parseListing, parsePrice, listingCandidate, listingMatches, isEgyptian, looksLikeProductPage } from '../src/sourcing/listings.js';
 import { buildDiscoveryRequest } from '../src/sourcing/discovery-prompt.js';
 import { normalizeProviderOutput } from '../src/sourcing/normalize.js';
 import { consolidate, gpuToken } from '../src/sourcing/consolidate.js';
@@ -57,16 +57,17 @@ test('Cohere adapter: v2 chat, JSON mode with the schema in the prompt first, mo
 });
 
 test('Cohere adapter: runaway output (MAX_TOKENS) moves to the next format and its tokens are still counted', async () => {
-  const f = F.fakeFetch({ cohere: (body) => (body.response_format && body.response_format.type === 'json_object' && !body.response_format.json_schema
-    ? new Response(JSON.stringify(F.cohereResponse([], { finish_reason: 'MAX_TOKENS', usage: { billed_units: { input_tokens: 400, output_tokens: 6000 } } })), { status: 200 })
+  const f = F.fakeFetch({ cohere: (body) => (body.thinking
+    ? new Response(JSON.stringify(F.cohereResponse([], { finish_reason: 'MAX_TOKENS', usage: { billed_units: { input_tokens: 400, output_tokens: 8000 } } })), { status: 200 })
     : new Response(JSON.stringify(F.cohereResponse([F.Y])), { status: 200 })) });
   const r = await createCohereProvider({ apiKey: 'k', fetch: f }).discover(REQ);
   assert.equal(r.ok, true);
-  assert.equal(r.variant, 'json_schema');
+  assert.deepEqual(f.calls[0].body.thinking, { type: 'disabled' }, 'thinking is switched off first');
+  assert.equal(r.variant, 'json_object+thinking');
   assert.equal(r.attempts[0].ok, false);
   assert.match(r.attempts[0].error, /runaway/);
-  assert.equal(r.usage.output_tokens, 6000 + 1400, 'the runaway tokens are part of the cost');
-  assert.equal(f.calls[1].body.response_format.json_schema.type, 'object');
+  assert.equal(r.usage.output_tokens, 8000 + 1400, 'the runaway tokens are part of the cost');
+  assert.equal(f.calls[1].body.thinking, undefined);
 });
 
 test('Cohere adapter: schema rejected (400) and runaway everywhere end in a reported failure; auth errors are not retried', async () => {
@@ -74,7 +75,7 @@ test('Cohere adapter: schema rejected (400) and runaway everywhere end in a repo
   const cut = await run('MAX_TOKENS');
   assert.equal(cut.ok, false);
   assert.match(cut.error, /max_tokens/);
-  assert.equal(cut.attempts.length, 3);
+  assert.equal(cut.attempts.length, 4);
   assert.ok(cut.usage.output_tokens > 0);
   const prose = await createCohereProvider({ apiKey: 'k', fetch: F.fakeFetch({ cohere: F.cohereResponse([], { message: { content: [{ type: 'text', text: 'Buy the IdeaPad.' }] } }) }) }).discover(REQ);
   assert.equal(prose.ok, false);
@@ -145,27 +146,45 @@ test('Cohere observability: cost estimate uses the command-a-plus row; usage and
 
 // --- Groq ----------------------------------------------------------------------------------------------------
 
-test('Groq Compound adapter: web search settings, executed search tools counted, JSON asked in the prompt', async () => {
-  const f = F.fakeFetch({ groq: F.groqResponse([F.Y]) });
+test('Groq adapter (gpt-oss-120b): built-in browser_search tool, JSON asked in the prompt, executed searches counted', async () => {
+  const f = F.fakeFetch({ groq: (body) => new Response(JSON.stringify(F.groqResponse([F.Y], { model: body.model })), { status: 200 }) });
   const r = await createGroqProvider({ apiKey: 'gq', fetch: f }).discover(REQ);
   assert.equal(r.ok, true);
+  assert.equal(r.variant, 'browser_search');
   assert.equal(r.usage.web_searches, 2);
   const b = f.calls[0].body;
-  assert.equal(b.model, 'groq/compound');
-  assert.deepEqual(b.search_settings, { country: 'egypt' });
-  assert.equal(b.response_format, undefined, 'compound gets the schema in the prompt');
+  assert.equal(b.model, 'openai/gpt-oss-120b');
+  assert.deepEqual(b.tools, [{ type: 'browser_search' }]);
+  assert.equal(b.response_format, undefined, 'browser search is not combinable with structured output');
   assert.match(b.messages[1].content, /JSON schema/);
 });
 
-test('Groq adapter: unsupported search_settings (400) retries without them; prose answer fails', async () => {
-  const f = F.fakeFetch({ groq: (body) => (body.search_settings ? new Response('{"error":{"message":"unknown field search_settings"}}', { status: 400 }) : new Response(JSON.stringify(F.groqResponse([F.X])), { status: 200 })) });
+test('Groq adapter: tool rejected (400) retries in JSON mode; Compound models use search_settings; prose fails', async () => {
+  const f = F.fakeFetch({ groq: (body) => (body.tools ? new Response('{"error":{"message":"tools not supported"}}', { status: 400 }) : new Response(JSON.stringify(F.groqResponse([F.X])), { status: 200 })) });
   const r = await createGroqProvider({ apiKey: 'k', fetch: f }).discover(REQ);
   assert.equal(r.ok, true);
-  assert.equal(r.variant, 'plain');
+  assert.equal(r.variant, 'json_object');
+  assert.deepEqual(f.calls[1].body.response_format, { type: 'json_object' });
+  const fc = F.fakeFetch({ groq: F.groqResponse([F.X]) });
+  await createGroqProvider({ apiKey: 'k', fetch: fc, model: 'groq/compound' }).discover(REQ);
+  assert.deepEqual(fc.calls[0].body.search_settings, { country: 'egypt' });
   const fp = F.fakeFetch({ groq: { choices: [{ finish_reason: 'stop', message: { content: 'Try the Lenovo IdeaPad.' } }], usage: {} } });
   const rp = await createGroqProvider({ apiKey: 'k', fetch: fp }).discover(REQ);
   assert.equal(rp.ok, false);
   assert.match(rp.error, /not JSON/);
+});
+
+test('web pages are never candidates; cheap "laptop" prices and category pages never become offers', () => {
+  const page = { provider: 'tavily', kind: 'web', title: 'HP Laptops: Shop at Best Price in 2025 Core 5 120U 16GB 512GB EGP 1,520', url: 'https://egypt.sharafdg.com/c/computing/Laptops?dFR=16GB', snippet: '' };
+  assert.equal(listingCandidate(parseListing(page), 'now'), null);
+  const cheap = { provider: 'serper', kind: 'shopping', title: 'HP 15 Core 5 120U 16GB 512GB', url: 'https://www.amazon.eg/x', price_text: 'EGP 1,520' };
+  assert.equal(listingCandidate(parseListing(cheap), 'now'), null);
+  assert.equal(looksLikeProductPage('https://egypt.sharafdg.com/c/computing/Laptops?dFR=1'), false);
+  assert.equal(looksLikeProductPage('https://2b.com.eg/en/computers/laptops.html'), false);
+  assert.equal(looksLikeProductPage('https://www.youtube.com/watch?v=x'), false);
+  assert.equal(looksLikeProductPage('https://www.amazon.eg/-/en/Laptop-Computers-30-000-above-EGP/s?rh=n%3A1'), false);
+  assert.equal(looksLikeProductPage('https://www.amazon.eg/dp/B0ABC'), true);
+  assert.equal(looksLikeProductPage('https://btech.com/en/lenovo-ideapad-slim-3-15iah8.html'), true);
 });
 
 // --- Tavily --------------------------------------------------------------------------------------------------
@@ -298,7 +317,8 @@ test('five providers: LLM + web + shopping evidence end to end, the unchanged en
   assert.equal(d.metrics.providers_ok, 5);
   assert.ok(d.metrics.evidence_searches >= 1 && d.metrics.evidence_searches <= 5);
   const lenovo = d.consolidated.find((c) => c.brand === 'Lenovo' && c.ram_gb === 16);
-  assert.deepEqual([...lenovo.providers].sort(), ['cohere', 'gemini', 'groq', 'serper', 'tavily'], 'tavily found it as a priced page too');
+  assert.deepEqual([...lenovo.providers].sort(), ['cohere', 'gemini', 'groq', 'serper'], 'web pages support, they never "find"');
+  assert.ok(lenovo.evidence_providers.includes('tavily'), 'tavily is evidence');
   assert.ok(['verified', 'listed'].includes(lenovo.verification_status));
   assert.ok(lenovo.evidence_confidence >= 0.8);
   const vivo16 = d.consolidated.find((c) => c.model.includes('X1605VA'));

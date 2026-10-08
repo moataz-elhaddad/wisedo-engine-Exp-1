@@ -141,9 +141,28 @@ export function parseListing(l) {
   };
 }
 
-/** A listing that is a full configuration with an EGP price, as a normalised candidate (normalize.js shape). */
+/** Below this an "EGP laptop price" is an accessory, an instalment or a parsing error (live check: 1,520 EGP). */
+export const MIN_LAPTOP_PRICE_EGP = 8000;
+
+/** Category, search, blog and video pages describe many products: never a product listing. */
+export function looksLikeProductPage(url) {
+  let u;
+  try { u = new URL(url); } catch { return false; }
+  const h = u.hostname.replace(/^www\./, ''), path = u.pathname.toLowerCase();
+  if (/youtube\.com|youtu\.be|facebook\.com|tiktok\.com|reddit\.com/.test(h) || /^blog\./.test(h)) return false;
+  if (/\/(c|s|search|category|categories|collections|blogs?|buying-guides|tag|compare)(\/|$)/.test(path) && !/\/products?\//.test(path)) return false;
+  if (u.search && /[?&](q|k|s|search|dFR|rh)=/.test(u.search)) return false;
+  if (/\/(laptops?|computers?|notebooks?)(\.html)?\/?$/.test(path)) return false;
+  return true;
+}
+
+/**
+ * A shopping listing that is a full configuration with an EGP price, as a normalised candidate (normalize.js shape).
+ * Web-search pages never become candidates (a category page once did, with a nonsense price): they are evidence only.
+ */
 export function listingCandidate(p, now) {
-  if (!p.brand || !p.model || p.price_egp === null) return null;
+  if (p.kind !== 'shopping') return null;
+  if (!p.brand || !p.model || p.price_egp === null || p.price_egp < MIN_LAPTOP_PRICE_EGP) return null;
   // Shop titles rarely name integrated graphics. With a laptop CPU named and no dedicated card anywhere in the text,
   // the GPU is taken as integrated (flagged gpu_assumed). Dedicated cards are always named in Egyptian shop titles.
   const dedicatedMentioned = /rtx|gtx|radeon\s*rx|\barc\s*a\d|nvidia|geforce|\bmx\s*\d{3}/i.test(`${p.title} ${p.snippet || ''}`);
