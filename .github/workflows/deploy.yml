@@ -147,7 +147,9 @@ jobs:
         env:
           EXPB_URL: ${{ steps.deploy.outputs.url }}
           WISEDO_ADMIN_TOKEN: ${{ env.ADMIN_TOKEN }}
-        run: python3 scripts/expb_smoke.py --require-providers 1 | tee expb-summary.txt
+        run: |
+          set -o pipefail
+          python3 scripts/expb_smoke.py --require-providers 1 | tee expb-summary.txt
       - name: Isolation guard (after deploy)
         if: always()
         run: node scripts/check-isolation.mjs --env "$TARGET"

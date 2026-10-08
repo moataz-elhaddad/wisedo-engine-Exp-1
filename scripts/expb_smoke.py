@@ -14,7 +14,8 @@ import json, os, sys, time, urllib.request, urllib.error
 
 URL = os.environ["EXPB_URL"].rstrip("/")
 TOKEN = os.environ.get("WISEDO_ADMIN_TOKEN", "").strip()
-args = [a for a in sys.argv[1:] if not a.startswith("--")]
+argv = sys.argv[1:]
+args = [a for i, a in enumerate(argv) if not a.startswith("--") and not (i > 0 and argv[i - 1] == "--require-providers")]
 TEXT = args[0] if args else ("I need a laptop for programming and daily work, around EGP 40,000, good battery life, "
                              "16GB RAM or more, available in Egypt.")
 need = 1
@@ -25,19 +26,26 @@ if "--require-providers" in sys.argv:
 def call(method, path, body=None, auth=False, timeout=60):
     req = urllib.request.Request(URL + path, method=method, data=json.dumps(body).encode() if body is not None else None)
     req.add_header("content-type", "application/json")
+    # Cloudflare rejects Python's default "Python-urllib" User-Agent (error 1010); identify the smoke test explicitly.
+    req.add_header("user-agent", "wisedo-exp1-smoke/1.0 (+github-actions)")
+    req.add_header("accept", "application/json")
     if auth and TOKEN:
         req.add_header("authorization", "Bearer " + TOKEN)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status, json.loads(r.read() or b"null")
+            code, raw = r.status, r.read()
     except urllib.error.HTTPError as e:
-        try:
-            return e.code, json.loads(e.read() or b"null")
-        except Exception:
-            return e.code, None
+        code, raw = e.code, e.read()
+    try:
+        return code, json.loads(raw or b"null")
+    except Exception:
+        print(f"non-JSON answer from {path}: HTTP {code}: {raw[:300]!r}")
+        return code, None
 
 
-status = call("GET", "/api/expb/status")[1]
+code, status = call("GET", "/api/expb/status")
+if not status:
+    sys.exit(f"FAILED: /api/expb/status answered HTTP {code} without JSON")
 json.dump(status, open("expb-status.json", "w"), indent=1)
 print("providers configured:", [(p["name"], p["role"], p["model"]) for p in status["providers"]])
 print("providers missing:", [(p["name"], p["secret"]) for p in status["missing"]])
@@ -46,6 +54,12 @@ print("experiment:", status.get("experiment"))
 code, s1 = call("POST", "/api/session", {"event": {"type": "start", "text": TEXT}})
 assert code == 200, (code, s1)
 state, ui = s1["state"], s1["ui"]
+if ui["screen"] in ("tiles", "unsupported", "not_configured"):
+    # Category not read from the text: pick the laptop tile, then give the same text to the session.
+    code, s1 = call("POST", "/api/session", {"event": {"type": "start", "tile": "laptop"}})
+    code, s1 = call("POST", "/api/session", {"state": s1["state"], "event": {"type": "addText", "text": TEXT}})
+    assert code == 200, (code, s1)
+    state, ui = s1["state"], s1["ui"]
 print("need text:", TEXT)
 print("layer 1 first screen:", ui["screen"], "| filled:", {k: v["value"] for k, v in state.get("values", {}).items()})
 if ui["screen"] != "result":
