@@ -141,7 +141,8 @@ async function runHandler(env, request, h) {
     providers: meta.providers,
     providers_missing: missing,
     evidence_runs: meta.evidence_runs,
-    raw: meta.raw,
+    // compact: the smoke test and slow links skip the full raw provider outputs (they can exceed 100 KB).
+    raw: body.compact ? meta.raw.map(({ raw_output, ...r }) => ({ ...r, listings: (r.listings || []).slice(0, 10) })) : meta.raw,
     queries: meta.request.queries,
     // Per-candidate observability (offers.js candidateReport): LLM claims vs verified listing facts.
     candidates: meta.candidates_report,
@@ -163,9 +164,11 @@ async function runHandler(env, request, h) {
   };
   console.log(JSON.stringify({ expb_run: requestId, status, metrics: out.metrics, providers: meta.providers.map((p) => ({ provider: p.provider, ok: p.ok, ms: p.latency_ms, n: p.candidate_count, usage: p.usage, cost_usd: p.cost_usd, error: p.error })) }));
   try {
-    await env.DB.prepare('INSERT INTO expb_runs (id, created_at, category, status, providers_ok, providers_called, consolidated, total_ms, cost_usd, profile, providers, top3, catalog_top3) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    await env.DB.prepare('INSERT INTO expb_runs (id, created_at, category, status, providers_ok, providers_called, consolidated, total_ms, cost_usd, profile, providers, top3, catalog_top3, candidates, metrics) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
       .bind(requestId, new Date().toISOString(), config.id, status, meta.metrics.providers_ok, meta.metrics.providers_called, meta.metrics.consolidated, total_ms, meta.metrics.estimated_cost_usd,
-        JSON.stringify(profile), JSON.stringify(meta.providers.map(({ attempts, ...p }) => p)), JSON.stringify(top3.map((p) => ({ product: p.product, score: p.score, price: p.price, providers: p.discovery && p.discovery.providers }))), JSON.stringify(catalogTop3.map((p) => ({ product: p.product, score: p.score, price: p.price }))))
+        JSON.stringify(profile), JSON.stringify(meta.providers.map(({ attempts, ...p }) => p)), JSON.stringify(top3.map((p) => ({ product: p.product, score: p.score, price: p.price, mpn: p.mpn, verified_price: p.verified_price, verified_retailer: p.verified_retailer, verified_product_url: p.verified_product_url, providers: p.discovery && p.discovery.providers }))), JSON.stringify(catalogTop3.map((p) => ({ product: p.product, score: p.score, price: p.price }))),
+        JSON.stringify(meta.candidates_report.map(({ llm_claims, evidence_sources, ...c }) => ({ ...c, evidence_sources: (evidence_sources || []).slice(0, 6).map((e) => ({ provider: e.provider, type: e.type, country: e.country, url: e.url, price: e.price, currency: e.currency, strength: e.strength })), llm_claims: (llm_claims || []).slice(0, 4) }))),
+        JSON.stringify(out.metrics))
       .run();
   } catch (e) {
     out.metrics.log_error = String((e && e.message) || e).slice(0, 120); // the run log is best effort

@@ -82,7 +82,7 @@ print("NeedProfile:", json.dumps({"money": profile["money"], "must": [f.get("att
                                   "needs": {n["slot"]: n["value"] for n in profile["needs"] if n["source"] != "default"}}))
 
 t0 = time.time()
-code, run = call("POST", "/api/expb/run", {"profile": profile}, auth=True, timeout=300)
+code, run = call("POST", "/api/expb/run", {"profile": profile, "compact": True}, auth=True, timeout=300)
 wall = time.time() - t0
 json.dump(run, open("expb-run.json", "w"), indent=1)
 print(f"\nexpb run: HTTP {code} in {wall:.1f}s, status {run and run.get('status')}, error {run and run.get('error')}")
