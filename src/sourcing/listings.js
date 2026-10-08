@@ -198,9 +198,15 @@ export function looksLikeProductPage(url) {
 export function listingCandidate(p, now) {
   // Shopping hits, and web hits that are a single product page on an Egyptian store (url-classify.js). Category,
   // search, article and foreign pages never become candidates (a category page once did, with a nonsense price).
-  if (p.kind !== 'shopping' && !(p.kind === 'web' && isEgyptianProductPage(p.url))) return null;
-  if (!p.brand || !p.model || p.price_egp === null || p.price_egp < MIN_LAPTOP_PRICE_EGP) return null;
-  if (p.kind === 'web' && !(p.cpu && p.ram_gb && p.storage_gb && p.price_from === 'field')) return null; // a full configuration, a structured price
+  // A web hit needs a full configuration; its price counts only when structured (otherwise the product page must
+  // supply it during verification, offers.js). Shopping hits always carry a structured price.
+  const web = p.kind === 'web';
+  if (!(p.kind === 'shopping' || (web && isEgyptianProductPage(p.url)))) return null;
+  if (!p.brand || !p.model) return null;
+  if (web && !(p.cpu && p.ram_gb && p.storage_gb)) return null;
+  if (web && p.price_from !== 'field') p = { ...p, price_egp: null };
+  if (!web && (p.price_egp === null || p.price_egp < MIN_LAPTOP_PRICE_EGP)) return null;
+  if (p.price_egp !== null && p.price_egp < MIN_LAPTOP_PRICE_EGP) p = { ...p, price_egp: null };
   // Shop titles rarely name integrated graphics. With a laptop CPU named and no dedicated card anywhere in the text,
   // the GPU is taken as integrated (flagged gpu_assumed). Dedicated cards are always named in Egyptian shop titles.
   const dedicatedMentioned = /rtx|gtx|radeon\s*rx|\barc\s*a\d|nvidia|geforce|\bmx\s*\d{3}/i.test(`${p.title} ${p.snippet || ''}`);
@@ -209,7 +215,7 @@ export function listingCandidate(p, now) {
   const c = {
     provider: p.provider, brand: canonicalBrand(p.brand), model: p.model, mpn: null, cpu: p.cpu, ram_gb: p.ram_gb, storage_gb: p.storage_gb,
     gpu: p.gpu || null, display: p.display, screen_inches: null, os: null, weight_kg: null, battery_hours: null, warranty_months: null,
-    price_egp: p.price_egp, currency: 'EGP', price_basis: 'listing', availability: 'listed', grey_import: null,
+    price_egp: p.price_egp, currency: 'EGP', price_basis: p.price_egp ? 'listing' : 'page_check_needed', availability: 'listed', grey_import: null,
     offers: [{ retailer: p.retailer, url: p.url, price_egp: p.price_egp, source: 'listing' }],
     fit_reasons: [], confidence: null, evidence: `${p.kind} listing: ${p.title}`.slice(0, 300),
     evidence_urls: [p.url].filter(Boolean), timestamp: now || null, from_listing: true, ...(gpuAssumed ? { gpu_assumed: true } : {}),

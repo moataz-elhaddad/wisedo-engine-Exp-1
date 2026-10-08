@@ -391,3 +391,24 @@ test('live regression: prices read from free text never verify; an RTX x070 lapt
   assert.equal(real.p.status, 'verified');
   assert.equal(real.p.verified_price, 104999);
 });
+
+test('a listing-only lead without a structured price becomes a candidate, and verifies only with the price on its own product page', async () => {
+  const { evidenceCandidates } = await import('../src/sourcing/discover.js');
+  const url = 'https://2b.com.eg/en/asus-tuf-gaming-a15-fa506ncr-hn007w-ryzen-7-7435hs-8gb-512gb-rtx-3050.html';
+  const lead = { provider: 'serper', kind: 'web', title: 'ASUS TUF Gaming A15 FA506NCR-HN007W Ryzen 7 7435HS 8GB 512GB SSD RTX 3050', url, snippet: 'Save EGP 5,000' };
+  const products = [];
+  const extra = evidenceCandidates(products, [{ listings: [lead] }], F.NOW, ['serper']);
+  assert.equal(extra.length, 1);
+  assert.equal(extra[0].price_egp, null, 'snippet text is not a price');
+  const page = `<html><title>ASUS TUF Gaming A15 FA506NCR-HN007W Ryzen 7 7435HS 8GB 512GB RTX 3050</title><script type="application/ld+json">{"offers":{"price":"37299","priceCurrency":"EGP"}}</script></html>`;
+  products.push(...extra);
+  collectOffers(products, [lead]);
+  await verifyOffers(products, { fetch: F.fakeFetch({}, { [url]: page }) });
+  assert.equal(products[0].status, 'verified');
+  assert.equal(products[0].verified_price, 37299);
+  const blocked = [...evidenceCandidates([], [{ listings: [lead] }], F.NOW, ['serper'])];
+  collectOffers(blocked, [lead]);
+  await verifyOffers(blocked, { fetch: F.fakeFetch({}, { [url]: 403 }) });
+  assert.equal(blocked[0].status, 'discovered_unverified');
+  assert.equal(blocked[0].exclusion_reason, 'no_egyptian_price');
+});

@@ -87,11 +87,12 @@ export function collectOffers(products, listings, opts = {}) {
  * @param {{fetch?: typeof fetch, enabled?: boolean, maxUrls?: number, timeoutMs?: number}} [opts]
  */
 export async function verifyOffers(products, opts = {}) {
-  const maxUrls = opts.maxUrls ?? 12;
+  const maxUrls = opts.maxUrls ?? 20;
   const jobs = [];
   const seen = new Set();
   // Listing-backed leads first (they already carry a price and a variant signal), then LLM URLs.
-  const ordered = products.flatMap((p) => (p._potential || []).map((o) => ({ p, o }))).sort((a, b) => (a.o.via === 'listing' ? 0 : 1) - (b.o.via === 'listing' ? 0 : 1));
+  const rank = (o) => (o.via === 'listing' ? (o.listing_price ? 0 : 1) : 2);
+  const ordered = products.flatMap((p) => (p._potential || []).map((o) => ({ p, o }))).sort((a, b) => rank(a.o) - rank(b.o));
   for (const j of ordered) {
     if (opts.enabled === false || jobs.length >= maxUrls || seen.has(j.o.url + '|' + j.p.key)) continue;
     seen.add(j.o.url + '|' + j.p.key);

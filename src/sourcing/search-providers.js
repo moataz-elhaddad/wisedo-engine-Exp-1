@@ -110,9 +110,10 @@ export function createSerperProvider(opts) {
     async evidence(cands) {
       const all = (await Promise.all(cands.flatMap((c) => {
         const q = exactQueries(c);
-        return [search(q.sites, 10), search(q.price, 8)].map((pr) => pr.then((ls) => ls.map((l) => ({ ...l, for_key: c.key }))));
+        // One site-filtered query per candidate: Workers allow ~50 subrequests per run (discovery + evidence + page checks).
+        return [search(q.sites, 10)].map((pr) => pr.then((ls) => ls.map((l) => ({ ...l, for_key: c.key }))));
       }))).flat();
-      return { ok: true, listings: all, usage: { search_calls: cands.length * 2, credits: cands.length * 2 } };
+      return { ok: true, listings: all, usage: { search_calls: cands.length, credits: cands.length } };
     },
   };
 }
