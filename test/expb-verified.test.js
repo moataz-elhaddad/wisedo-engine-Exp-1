@@ -366,3 +366,28 @@ test('"nothing fits" is not padded with the engine\'s closest misses', async () 
   assert.notEqual(r.status, 'ok');
   assert.equal(topThree(r, snapshot, index).length, 0);
 });
+
+test('live regression: "R7 7435HS" / "RyzenTM" / "Ci7" are read as processors, so a different CPU never verifies (TUF A15 R5 6600H vs R7 7435HS)', async () => {
+  const { parseListing, listingMatches } = await import('../src/sourcing/listings.js');
+  const l = parseListing({ provider: 'serper', kind: 'web', title: 'ASUS TUF Gaming A15', price_text: 'EGP 37,299',
+    url: 'https://eshop.vodafone.com.eg/en/prod/asus-tuf-gaming-a15-r7-7435hs---8gb-ddr5512gb-ssd--nvidia-geforce-rtx-3050-laptop-gpu---fa506ncr-hn007w' });
+  assert.equal(l.cpu, 'ryzen 7 7435hs');
+  assert.equal(l.storage_gb, 512);
+  assert.equal(listingMatches({ brand: 'Asus', model: 'TUF Gaming A15', cpu: 'AMD Ryzen 5 6600H', ram_gb: 8, storage_gb: 512, gpu: 'NVIDIA GeForce RTX 3050 4GB' }, l).why, 'cpu differs');
+  assert.equal(parseListing({ title: 'ASUS ROG Strix G16 AMD RyzenTM 9 9955HX 16GB 1TB', url: 'https://2b.com.eg/x' }).cpu, 'ryzen 9 9955hx');
+  assert.equal(parseListing({ title: 'ASUS TUF F15 FX507VU Ci7-13620H 16GB 512GB', url: 'https://www.compumarts.com/products/x' }).cpu, 'core i7-13620h');
+});
+
+test('live regression: prices read from free text never verify; an RTX x070 laptop at 39,900 EGP from a listing is implausible', async () => {
+  const cand = { ...F.X, brand: 'Asus', model: 'ROG Strix G16 G614FP', mpn: 'G614FP-GR169W', cpu: 'AMD Ryzen 9 9955HX', ram_gb: 16, storage_gb: 1024, gpu: 'NVIDIA GeForce RTX 5070 8GB', price_egp: 39900, offers: [] };
+  const url = 'https://www.noon.com/egypt-en/asus-g614fp-gr169w-gaming-laptop-ryzen-9-9955hx-rtx-5070-8gb-16gb-ram-1tb-ssd/N70410542V/p/';
+  const title = 'ASUS G614FP-GR169W Gaming Laptop Ryzen 9 9955HX RTX 5070 8GB 16GB RAM 1TB SSD';
+  const textOnly = await run(cand, [{ provider: 'tavily', kind: 'web', title, url, snippet: 'Now EGP 39,900' }], { [url]: 403 });
+  assert.equal(textOnly.p.status, 'discovered_unverified');
+  assert.equal(textOnly.p.exclusion_reason, 'no_egyptian_price');
+  const field = await run(cand, [{ provider: 'serper', kind: 'web', title, url, price_text: 'EGP 39,900' }], { [url]: 403 });
+  assert.equal(field.p.exclusion_reason, 'implausible_price');
+  const real = await run(cand, [{ provider: 'serper', kind: 'web', title, url, price_text: 'EGP 104,999' }], { [url]: 403 });
+  assert.equal(real.p.status, 'verified');
+  assert.equal(real.p.verified_price, 104999);
+});

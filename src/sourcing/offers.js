@@ -63,7 +63,9 @@ export function collectOffers(products, listings, opts = {}) {
       if (l.cls.type !== 'direct_product') { reject(TYPE_REASON[l.cls.type] || 'no_direct_url', l.url); continue; }
       if (!l.cls.egypt) { reject('wrong_country', l.url, l.cls.country || 'not an Egyptian storefront'); continue; }
       if (!potential.has(l.url)) {
-        potential.set(l.url, { url: l.url, retailer: l.cls.retailer || l.source || l.cls.host, listing_price: l.currency === 'EGP' ? l.price_egp : null, listing_currency: l.currency, strength: m.strength, provider: l.provider, via: 'listing' });
+        potential.set(l.url, { url: l.url, retailer: l.cls.retailer || l.source || l.cls.host, listing_price: l.currency === 'EGP' && l.price_from === 'field' ? l.price_egp : null, listing_currency: l.currency, strength: m.strength, provider: l.provider, via: 'listing' });
+      } else if (!potential.get(l.url).listing_price && l.currency === 'EGP' && l.price_from === 'field') {
+        potential.get(l.url).listing_price = l.price_egp;
       }
     }
     // An LLM-proposed URL is a lead to check, not evidence: it can become an offer only through the page itself.
@@ -119,6 +121,8 @@ export function decideOffers(p, checkOf) {
     if (pagePrice && (pageStrong || !(price > 0))) { price = pagePrice; priceSource = 'page'; }
     if (!(price > 0)) { reject(pc && pc.page_currency && pc.page_currency !== 'EGP' ? 'wrong_country' : 'no_egyptian_price', pc && pc.page_currency ? `page currency ${pc.page_currency}` : null); continue; }
     if (price < MIN_LAPTOP_PRICE_EGP) { reject('implausible_price', `${price} EGP`); continue; }
+    const floor = priceFloor(p.gpu);
+    if (price < floor && priceSource !== 'page') { reject('implausible_price', `${price} EGP is below ${floor} EGP for ${p.gpu}; not confirmed by the product page`); continue; }
     p.verified_offers.push({
       retailer: o.retailer, url: o.url, price_egp: price, currency: 'EGP', price_source: priceSource,
       match_strength: pageStrong ? (o.strength === 'mpn' ? 'mpn' : 'page_verified') : o.strength,
@@ -143,6 +147,18 @@ export function decideOffers(p, checkOf) {
   p.evidence_urls = [...new Set([...p.evidence_sources.map((e) => e.url), ...(p.evidence_urls || [])])].filter(Boolean);
   delete p._potential;
   return p;
+}
+
+/**
+ * Sanity floor by graphics class (new laptops in Egypt, deliberately low: it only catches bait listings, instalment
+ * amounts and snippet numbers, e.g. a live "39,900 EGP" RTX 5070 laptop). A price read from the product page itself
+ * is not second-guessed.
+ */
+export function priceFloor(gpu) {
+  const g = String(gpu || '').toLowerCase();
+  if (/rtx\s*[2-5]0[789]0/.test(g)) return 55000;
+  if (/rtx\s*[2-5]060/.test(g)) return 35000;
+  return MIN_LAPTOP_PRICE_EGP;
 }
 
 /** The per-candidate observability row (API response and run log). */

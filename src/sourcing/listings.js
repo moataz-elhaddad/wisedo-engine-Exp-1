@@ -126,13 +126,23 @@ function slugText(url) {
   try { return decodeURIComponent(new URL(url).pathname).replace(/\.html?$/, '').replace(/[-_/+]+/g, ' ').replace(/core\s*i([3579])\s+(\d{4,5}[a-z]*)/gi, 'core i$1-$2').replace(/corei([3579])/gi, 'core i$1'); } catch { return ''; }
 }
 
+/** Shop spellings of processors: "R7 7435HS", "Ryzen™"/"RyzenTM", "Ci7-13620H", "Corei7". */
+function specNorm(s) {
+  return String(s ?? '').replace(/ryzen\s*(?:tm|™)/gi, 'ryzen').replace(/\br([3579])[\s-]+(\d{4}[a-z]{0,2})\b/gi, 'ryzen $1 $2')
+    .replace(/\bc(?:ore\s*)?i([3579])[\s-]*(\d{4,5}[a-z]{0,2})\b/gi, 'core i$1-$2').replace(/corei([3579])/gi, 'core i$1')
+    .replace(/ddr([345])x?(\d{3,4}\s*(?:gb|tb))/gi, 'ddr$1 $2');
+}
+
 export function parseListing(l) {
-  const text = `${l.title || ''} ${l.snippet || ''} ${slugText(l.url)}`;
+  const text = specNorm(`${l.title || ''} ${l.snippet || ''} ${slugText(l.url)}`);
   const t = lc(text);
-  const titleL = lc(l.title || '');
+  const titleL = lc(specNorm(l.title || ''));
   const brand = brandOf(l.title || '') || brandOf(text);
+  // A structured price (shopping result, rich-snippet price) is a listing fact; a number read out of free text
+  // (snippets, page excerpts: "save EGP ...", instalments, other products) is not, and never verifies an offer.
   const fromField = parsePrice(l.price_text || '');
   const { price, currency } = fromField.price ? fromField : parsePrice(text);
+  const price_from = fromField.price ? 'field' : price ? 'text' : null;
   const cpu = cpuText(titleL) || cpuText(t);
   const gpu = gpuText(titleL) || gpuText(t);
   return {
@@ -144,7 +154,7 @@ export function parseListing(l) {
     storage_gb: storageOf(titleL) ?? storageOf(t),
     display: displayText(titleL) || displayText(t),
     price_egp: currency === 'EGP' ? price : null,
-    price, currency,
+    price, currency, price_from,
     retailer: l.source || host(l.url),
     host: host(l.url),
     egypt: isEgyptian(l.url, currency),
@@ -190,7 +200,7 @@ export function listingCandidate(p, now) {
   // search, article and foreign pages never become candidates (a category page once did, with a nonsense price).
   if (p.kind !== 'shopping' && !(p.kind === 'web' && isEgyptianProductPage(p.url))) return null;
   if (!p.brand || !p.model || p.price_egp === null || p.price_egp < MIN_LAPTOP_PRICE_EGP) return null;
-  if (p.kind === 'web' && !(p.cpu && p.ram_gb && p.storage_gb)) return null; // a full configuration only
+  if (p.kind === 'web' && !(p.cpu && p.ram_gb && p.storage_gb && p.price_from === 'field')) return null; // a full configuration, a structured price
   // Shop titles rarely name integrated graphics. With a laptop CPU named and no dedicated card anywhere in the text,
   // the GPU is taken as integrated (flagged gpu_assumed). Dedicated cards are always named in Egyptian shop titles.
   const dedicatedMentioned = /rtx|gtx|radeon\s*rx|\barc\s*a\d|nvidia|geforce|\bmx\s*\d{3}/i.test(`${p.title} ${p.snippet || ''}`);
@@ -241,6 +251,6 @@ export function listingMatches(cand, p) {
   if (hit < 0.75) return { match: false, strength: null, why: `model tokens ${hit.toFixed(2)}` };
   const specsSeen = [p.ram_gb, p.storage_gb, pt].filter(Boolean).length;
   // A model name is shared by many configurations: the processor or the graphics card must be seen agreeing too.
-  const coreSeen = !!(ct && pt) || !!(cg && pg);
-  return { match: true, strength: specsSeen >= 2 && coreSeen ? 'model+specs' : 'model', why: `model tokens ${hit.toFixed(2)}, ${specsSeen} specs agree${coreSeen ? '' : ', CPU/GPU not confirmed'}` };
+  const coreSeen = !!(ct && pt); // the GPU alone is shared by many processors (live: TUF A15 R5 6600H vs R7 7435HS)
+  return { match: true, strength: specsSeen >= 2 && coreSeen ? 'model+specs' : 'model', why: `model tokens ${hit.toFixed(2)}, ${specsSeen} specs agree${coreSeen ? '' : ', CPU not confirmed'}` };
 }

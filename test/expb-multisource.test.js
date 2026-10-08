@@ -329,7 +329,7 @@ test('five providers: LLM + web + shopping evidence end to end, the unchanged en
   assert.ok(d.metrics.evidence_candidates >= 1 && d.metrics.evidence_candidates <= 6);
   assert.ok(d.metrics.evidence_searches >= d.metrics.evidence_candidates, 'exact-model Egypt queries per candidate');
   const lenovo = d.consolidated.find((c) => c.brand === 'Lenovo' && c.ram_gb === 16);
-  assert.deepEqual([...lenovo.providers].sort(), ['cohere', 'gemini', 'groq', 'serper', 'tavily'], 'an Egyptian product page with a full configuration counts as a find');
+  assert.deepEqual([...lenovo.providers].sort(), ['cohere', 'gemini', 'groq', 'serper'], 'a web page counts as a find only with a structured price (Tavily text is evidence)');
   assert.ok(lenovo.evidence_providers.includes('tavily'), 'tavily is evidence');
   assert.ok(['verified', 'listed'].includes(lenovo.verification_status));
   assert.ok(lenovo.evidence_confidence >= 0.8);
