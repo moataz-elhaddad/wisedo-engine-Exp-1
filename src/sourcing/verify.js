@@ -8,6 +8,7 @@
 // Per URL status: verified | partial | mismatch | unavailable | blocked | unreachable | error
 // Candidate status: best URL status, or "no_url" / "not_checked".
 import { modelTokens, cpuToken } from './consolidate.js';
+import { looksLikeProductPage, isClassifieds } from './listings.js';
 
 export const VERIFY_DEFAULTS = { maxUrls: 12, timeoutMs: 5000, maxBytes: 600_000 };
 const USER_AGENT = 'Mozilla/5.0 (compatible; WisedoExp1-LinkCheck/0.1; product-availability experiment)';
@@ -169,11 +170,16 @@ export async function verifyCandidates(products, opts = {}) {
   const results = await Promise.all(jobs.map(({ p, o }) => verifyUrl(o.url, p, opts).then((r) => ({ p, o, r }))));
   for (const { p, o, r } of results) {
     p.verification.urls.push(r);
-    o.verification = r.status;
     // A structured page price close to the provider's claim replaces it (the page is better evidence).
+    const retailPage = looksLikeProductPage(o.url) && !isClassifieds(o.url);
     const claimed = o.price_egp ?? p.price_egp;
-    const pagePrice = (r.page_prices || []).find((x) => !claimed || (x >= claimed * 0.5 && x <= claimed * 2));
+    const pagePrice = !retailPage ? null : (r.page_prices || []).find((x) => !claimed || (x >= claimed * 0.5 && x <= claimed * 2));
     if ((r.status === 'verified' || r.status === 'partial') && pagePrice) { o.page_price_egp = pagePrice; o.price_source = 'page'; }
+    // A search/category page or a classifieds ad can name the product but is not a retail product page:
+    // at most "partial", and its price is never used.
+    if (!retailPage && r.status === 'verified') { r.status = 'partial'; r.note = isClassifieds(o.url) ? 'classifieds listing' : 'not a single-product page'; }
+    if (!retailPage) delete r.page_prices;
+    o.verification = r.status;
     if (r.status === 'unavailable') o.in_stock = false;
     // The page shows another product: the link is wrong. Keep the candidate, drop the link (a search link replaces it).
     if (r.status === 'mismatch') { o.rejected_url = o.url; o.url = null; }

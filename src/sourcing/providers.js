@@ -109,7 +109,8 @@ async function runVariants(variants, call, retryOn = (e) => e instanceof Provide
 
 /**
  * Model fallback: a provider configured with "model-a,model-b" tries model-a first and moves to model-b only when
- * the provider says the model does not exist for this key (404) or its quota is used up (429). Each attempt is kept.
+ * the provider says the model does not exist for this key (404), its quota is used up (429) or it is overloaded (503).
+ * Each attempt is kept.
  * @param {string[]} models
  * @param {(model: string) => any} make  adapter factory for one model
  */
@@ -126,7 +127,7 @@ export function withModelFallback(models, make) {
       for (const m of list) {
         res = await make(m).discover(req);
         tried.push({ model: m, ok: !!res.ok, ...(res.ok ? {} : { error: String(res.error || '').slice(0, 160) }) });
-        if (res.ok || !/HTTP (404|429)|does not exist|not found|RESOURCE_EXHAUSTED|quota/i.test(String(res.error || ''))) break;
+        if (res.ok || !/HTTP (404|429|503)|does not exist|not found|RESOURCE_EXHAUSTED|UNAVAILABLE|high demand|quota/i.test(String(res.error || ''))) break;
       }
       return { ...res, model_attempts: tried, model: res.model || tried[tried.length - 1].model };
     },
@@ -327,14 +328,13 @@ export function createCohereProvider(opts) {
   // JSON mode with the schema in the prompt first (schema-constrained mode produced runaway output in the live
   // check); then strict schema mode, then plain text. A rejected request (400) or a runaway answer (max_tokens)
   // moves on to the next format.
-  // Reasoning-capable Command models think by default and spent the whole output budget on it in the live check:
-  // thinking is switched off first ({type: 'disabled'}); variants without the parameter follow for models that
-  // reject it.
+  // Live runs: with the model's default thinking and a 12k budget, JSON mode answers (~7k tokens incl. thinking);
+  // with thinking disabled it ran away. Thinking-disabled and schema variants remain as fallbacks.
   const variants = [
-    { name: 'json_object', format: 'object', noThink: true },
-    { name: 'json_object+thinking', format: 'object' },
-    { name: 'json_schema', format: 'schema', noThink: true },
-    { name: 'plain', format: null, noThink: true },
+    { name: 'json_object', format: 'object' },
+    { name: 'json_object+no_thinking', format: 'object', noThink: true },
+    { name: 'json_schema', format: 'schema' },
+    { name: 'plain', format: null },
   ];
   return {
     name: 'cohere', role: 'llm', model,
@@ -344,7 +344,7 @@ export function createCohereProvider(opts) {
           model,
           messages: [{ role: 'system', content: req.system }, { role: 'user', content: req.user + (v.format === 'schema' ? '\n\nAnswer with the JSON object only.' : schemaNote(req)) }],
           temperature: 0.2,
-          max_tokens: 8000,
+          max_tokens: 12000,
           ...(v.noThink ? { thinking: { type: 'disabled' } } : {}),
           ...(v.format === 'schema' ? { response_format: { type: 'json_object', json_schema: stripKeywords(req.schema, ['maxItems', 'description']) } } : {}),
           ...(v.format === 'object' ? { response_format: { type: 'json_object' } } : {}),
@@ -376,7 +376,8 @@ export function createGroqProvider(opts) {
   // GPT-OSS models carry Groq's built-in browser_search tool (not combinable with structured output, so the schema
   // goes in the prompt); Compound systems search on their own; other models answer from knowledge in JSON mode.
   const variants = /^openai\/gpt-oss/.test(model)
-    ? [...(search ? [{ name: 'browser_search', tools: [{ type: 'browser_search' }] }] : []), { name: 'json_object', json: true }, { name: 'plain' }]
+    // reasoning_effort low keeps browsing short (the first live run read ~600k tokens of pages at the default).
+    ? [...(search ? [{ name: 'browser_search', tools: [{ type: 'browser_search' }], effort: 'low' }, { name: 'browser_search+default', tools: [{ type: 'browser_search' }] }] : []), { name: 'json_object', json: true }, { name: 'plain' }]
     : /compound/.test(model)
       ? [{ name: 'search_settings', settings: true }, { name: 'plain' }]
       : [{ name: 'json_object', json: true }, { name: 'plain' }];
@@ -390,6 +391,7 @@ export function createGroqProvider(opts) {
           temperature: 0.2,
           max_tokens: 8000,
           ...(v.tools ? { tools: v.tools, tool_choice: 'auto' } : {}),
+          ...(v.effort ? { reasoning_effort: v.effort } : {}),
           ...(v.json ? { response_format: { type: 'json_object' } } : {}),
           ...(v.settings && search ? { search_settings: { country: 'egypt' } } : {}),
         }, timeoutMs, 'groq');

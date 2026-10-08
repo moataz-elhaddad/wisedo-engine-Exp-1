@@ -39,6 +39,27 @@ const pickRow = (pick, index) => {
   };
 };
 
+/**
+ * Top 3 = the engine's role picks, continued down the engine's own ranked list ("others") when it named fewer than
+ * three roles. The order is entirely Layer 2's; this only reads rows it already produced.
+ */
+export function topThree(result, snapshot, index) {
+  const rows = (result.picks || []).map((p) => pickRow(p, index));
+  const offers = new Map((snapshot.offers || []).map((o) => [o.id, o]));
+  const shops = new Map((snapshot.retailers || []).map((r) => [r.id, r]));
+  for (const o of result.others || []) {
+    if (rows.length >= 3) break;
+    const offer = offers.get(o.offerId);
+    const meta = index ? index[o.product.id] : null;
+    rows.push({
+      role: 'ranked', product: o.product, score: o.score, fit: o.fit, affordability: o.affordability,
+      price: offer ? offer.price_egp : null, effCost: o.effCost, retailer: shops.get(o.retailerId) ? shops.get(o.retailerId).name : o.retailerId,
+      url: offer ? offer.url : null, reasons: [], notListed: [], warnings: [], ...(meta ? { discovery: meta } : {}),
+    });
+  }
+  return rows.slice(0, 3).map((r, i) => ({ ...r, rank: i + 1 }));
+}
+
 function rateKey(request) { return 'expb:' + (request.headers.get('cf-connecting-ip') || 'local'); }
 
 /**
@@ -100,8 +121,8 @@ async function runHandler(env, request, h) {
   ]);
   const meta = llm.meta;
   const result = llm.result;
-  const top3 = (result.picks || []).slice(0, 3).map((p, i) => pickRow({ ...p, rank: i + 1 }, meta.index));
-  const catalogTop3 = (cat.result.picks || []).slice(0, 3).map((p, i) => pickRow({ ...p, rank: i + 1 }, null));
+  const top3 = topThree(result, llm.snapshot, meta.index);
+  const catalogTop3 = topThree(cat.result, catalog, null);
   const total_ms = Date.now() - t0;
   const status = !meta.ok ? 'no_providers' : result.status;
   const out = {

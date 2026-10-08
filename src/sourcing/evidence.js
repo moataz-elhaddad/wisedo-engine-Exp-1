@@ -4,7 +4,7 @@
 // name or MPN present) becomes evidence. An Egyptian listing with an EGP price also becomes a retailer offer
 // (price_source "listing"). Listings never change a candidate's specs. Search evidence is kept apart from LLM
 // consensus: providers that FOUND a product vs. pages that SUPPORT it.
-import { parseListing, listingMatches, looksLikeProductPage, MIN_LAPTOP_PRICE_EGP } from './listings.js';
+import { parseListing, listingMatches, looksLikeProductPage, isClassifieds, MIN_LAPTOP_PRICE_EGP } from './listings.js';
 
 /**
  * @param {any[]} products   consolidated candidates (mutated: .listing_evidence, .offers, .evidence_urls)
@@ -22,7 +22,7 @@ export function attachEvidence(products, listings) {
       if (l.url && !p.evidence_urls.includes(l.url)) p.evidence_urls.push(l.url);
       const isShopRedirect = /google\.[a-z.]+\/(shopping|aclk|url)/.test(l.url || '');
       // An offer needs an Egyptian EGP price on a single-product listing (shop result, or a product page).
-      const singleProduct = l.kind === 'shopping' || (l.url && looksLikeProductPage(l.url));
+      const singleProduct = (l.kind === 'shopping' || (l.url && looksLikeProductPage(l.url))) && !(l.url && isClassifieds(l.url));
       if (l.egypt && l.price_egp >= MIN_LAPTOP_PRICE_EGP && singleProduct && (l.url || l.retailer) && m.strength !== 'model') {
         const key = l.url && !isShopRedirect ? l.url : `retailer:${String(l.retailer).toLowerCase()}`;
         const same = p.offers.find((o) => (o.url || `retailer:${String(o.retailer).toLowerCase()}`) === key);

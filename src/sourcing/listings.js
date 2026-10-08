@@ -144,6 +144,14 @@ export function parseListing(l) {
 /** Below this an "EGP laptop price" is an accessory, an instalment or a parsing error (live check: 1,520 EGP). */
 export const MIN_LAPTOP_PRICE_EGP = 8000;
 
+/** Classifieds / second-hand marketplaces: prices there are for used or unofficial units, never a retail offer. */
+export const CLASSIFIEDS_HOSTS = ['dubizzle.com.eg', 'dubizzle.com', 'olx.com.eg', 'opensooq.com', 'facebook.com', 'hatla2ee.com'];
+export function isClassifieds(url) {
+  let h;
+  try { h = new URL(url).hostname.replace(/^www\./, '').toLowerCase(); } catch { return false; }
+  return CLASSIFIEDS_HOSTS.some((x) => h === x || h.endsWith('.' + x));
+}
+
 /** Category, search, blog and video pages describe many products: never a product listing. */
 export function looksLikeProductPage(url) {
   let u;
@@ -153,6 +161,7 @@ export function looksLikeProductPage(url) {
   if (/\/(c|s|search|category|categories|collections|blogs?|buying-guides|tag|compare)(\/|$)/.test(path) && !/\/products?\//.test(path)) return false;
   if (u.search && /[?&](q|k|s|search|dFR|rh)=/.test(u.search)) return false;
   if (/\/(laptops?|computers?|notebooks?)(\.html)?\/?$/.test(path)) return false;
+  if (/\/q-[^/]+\/?$/.test(path)) return false; // dubizzle-style search pages
   return true;
 }
 

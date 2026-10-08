@@ -15,6 +15,9 @@ import { attachEvidence } from '../src/sourcing/evidence.js';
 import { discoverProducts, runProvider } from '../src/sourcing/discover.js';
 import { LLMProductDiscoverySource, recommendWith } from '../src/sourcing/product-source.js';
 import { validateSnapshot } from '../src/contracts.js';
+import { verifyCandidates } from '../src/sourcing/verify.js';
+import { buildEphemeralSnapshot } from '../src/sourcing/ephemeral-snapshot.js';
+import { match } from '../src/layer2/index.js';
 import { checkIsolation, loadFiles, parseJsonc, FORBIDDEN } from '../scripts/check-isolation.mjs';
 
 const REQ = buildDiscoveryRequest(F.PROFILE, F.laptopConfig);
@@ -57,17 +60,18 @@ test('Cohere adapter: v2 chat, JSON mode with the schema in the prompt first, mo
 });
 
 test('Cohere adapter: runaway output (MAX_TOKENS) moves to the next format and its tokens are still counted', async () => {
-  const f = F.fakeFetch({ cohere: (body) => (body.thinking
+  const f = F.fakeFetch({ cohere: (body) => (!body.thinking
     ? new Response(JSON.stringify(F.cohereResponse([], { finish_reason: 'MAX_TOKENS', usage: { billed_units: { input_tokens: 400, output_tokens: 8000 } } })), { status: 200 })
     : new Response(JSON.stringify(F.cohereResponse([F.Y])), { status: 200 })) });
   const r = await createCohereProvider({ apiKey: 'k', fetch: f }).discover(REQ);
   assert.equal(r.ok, true);
-  assert.deepEqual(f.calls[0].body.thinking, { type: 'disabled' }, 'thinking is switched off first');
-  assert.equal(r.variant, 'json_object+thinking');
+  assert.equal(f.calls[0].body.thinking, undefined, 'the model default thinking first');
+  assert.equal(f.calls[0].body.max_tokens, 12000);
+  assert.equal(r.variant, 'json_object+no_thinking');
   assert.equal(r.attempts[0].ok, false);
   assert.match(r.attempts[0].error, /runaway/);
   assert.equal(r.usage.output_tokens, 8000 + 1400, 'the runaway tokens are part of the cost');
-  assert.equal(f.calls[1].body.thinking, undefined);
+  assert.deepEqual(f.calls[1].body.thinking, { type: 'disabled' });
 });
 
 test('Cohere adapter: schema rejected (400) and runaway everywhere end in a reported failure; auth errors are not retried', async () => {
@@ -151,6 +155,7 @@ test('Groq adapter (gpt-oss-120b): built-in browser_search tool, JSON asked in t
   const r = await createGroqProvider({ apiKey: 'gq', fetch: f }).discover(REQ);
   assert.equal(r.ok, true);
   assert.equal(r.variant, 'browser_search');
+  assert.equal(f.calls[0].body.reasoning_effort, 'low');
   assert.equal(r.usage.web_searches, 2);
   const b = f.calls[0].body;
   assert.equal(b.model, 'openai/gpt-oss-120b');
@@ -164,7 +169,7 @@ test('Groq adapter: tool rejected (400) retries in JSON mode; Compound models us
   const r = await createGroqProvider({ apiKey: 'k', fetch: f }).discover(REQ);
   assert.equal(r.ok, true);
   assert.equal(r.variant, 'json_object');
-  assert.deepEqual(f.calls[1].body.response_format, { type: 'json_object' });
+  assert.deepEqual(f.calls[2].body.response_format, { type: 'json_object' }, 'both browser_search variants were rejected first');
   const fc = F.fakeFetch({ groq: F.groqResponse([F.X]) });
   await createGroqProvider({ apiKey: 'k', fetch: fc, model: 'groq/compound' }).discover(REQ);
   assert.deepEqual(fc.calls[0].body.search_settings, { country: 'egypt' });
@@ -388,4 +393,45 @@ test('isolation: the guard rejects the original Worker, original D1, catalog res
   assert.ok(mutate((t) => t.replace('"staging": {', '"prod2": {')).some((p) => /unknown environment/.test(p)));
   const wf = checkIsolation({ ...files, workflows: { 'x.yml': 'run: npx wrangler d1 migrations apply wisedo-engine-demo --remote' } });
   assert.ok(wf.some((p) => /wisedo-engine-demo/.test(p)));
+});
+
+// --- live-run regressions ------------------------------------------------------------------------------------
+
+test('classifieds and search pages: never an offer, never "verified", their prices are ignored', async () => {
+  const { isClassifieds } = await import('../src/sourcing/listings.js');
+  assert.equal(isClassifieds('https://www.dubizzle.com.eg/en/electronics/laptop-computers/q-slim-3/'), true);
+  assert.equal(looksLikeProductPage('https://www.dubizzle.com.eg/en/electronics/laptop-computers/q-slim-3/'), false);
+  const dub = 'https://www.dubizzle.com.eg/en/electronics/laptop-computers/q-slim-3/';
+  const pages = { [dub]: '<html><title>Lenovo IdeaPad Slim 3 15IAH8 i5-12450H 16GB 512GB</title><script>{"price":"23000"}</script></html>' };
+  const c = norm({ ...F.X, offers: [{ retailer: 'Dubizzle', url: dub, price_egp: 23000 }] }, 'groq');
+  const products = consolidate([c], ['groq']);
+  await verifyCandidates(products, { fetch: F.fakeFetch({}, pages) });
+  assert.equal(products[0].verification.urls[0].status, 'partial');
+  assert.equal(products[0].offers[0].page_price_egp, undefined);
+  const { snapshot, unrankable } = buildEphemeralSnapshot(products, { configs: F.CONFIGS, category: 'laptop', now: F.NOW });
+  assert.equal(snapshot.offers.length, 0, 'a classifieds ad is not a retail offer');
+  assert.equal(unrankable.length, 1);
+});
+
+test('model fallback also moves on when a model is overloaded (503)', async () => {
+  const f = F.fakeFetch({ gemini: (body, calls) => (calls[calls.length - 1].url.includes('model-a') ? new Response('{"error":{"status":"UNAVAILABLE","message":"high demand"}}', { status: 503 }) : new Response(JSON.stringify(F.geminiResponse([F.X])), { status: 200 })) });
+  const [gem] = providersFromEnv({ DISCOVERY_PROVIDERS: 'gemini', GEMINI_API_KEY: 'k', GEMINI_DISCOVERY_MODEL: 'model-a,model-b' }, { fetch: f }).available;
+  const r = await runProvider(gem, REQ, 5000);
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.model_attempts.map((x) => [x.model, x.ok]), [['model-a', false], ['model-b', true]]);
+});
+
+test('Top 3 continues down the engine ranked list when it names fewer than three roles (order unchanged)', async () => {
+  const { topThree } = await import('../worker/expb.js');
+  const products = consolidate([norm(F.X, 'a'), norm(F.Y, 'a'), norm(F.Z, 'a')], ['a']);
+  await verifyCandidates(products, { enabled: false });
+  const { snapshot, index } = buildEphemeralSnapshot(products, { configs: F.CONFIGS, category: 'laptop', now: F.NOW });
+  const r = match(F.PROFILE, snapshot, F.NOW, 'rank');
+  const two = { ...r, picks: r.picks.slice(0, 1) };
+  const top = topThree(two, snapshot, index);
+  assert.equal(top.length, Math.min(3, 1 + two.others.length));
+  assert.equal(top[0].product.id, r.picks[0].product.id);
+  assert.deepEqual(top.slice(1).map((t) => t.product.id), two.others.slice(0, 2).map((o) => o.product.id));
+  assert.ok(top.slice(1).every((t) => t.role === 'ranked' && typeof t.price === 'number' && t.discovery));
+  assert.deepEqual(top.map((t) => t.rank), top.map((_, i) => i + 1));
 });

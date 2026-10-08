@@ -11,6 +11,7 @@
 //     for a catalog offer without a plan). Reported in the response.
 // Candidates without any price cannot be ranked (Layer 2 needs offer.price_egp > 0): listed as unrankable.
 import { laptopAttrs } from './specs.js';
+import { isClassifieds } from './listings.js';
 
 export const EPHEMERAL_TENANT = 'expb-ephemeral';
 
@@ -80,6 +81,7 @@ export function buildEphemeralSnapshot(products, ctx) {
     for (const o of listing) {
       const price = o.page_price_egp ?? o.listing_price_egp ?? o.price_egp ?? (listing.length === 1 ? p.price_egp : null);
       if (!(typeof price === 'number' && price > 0)) continue;
+      if (o.url && isClassifieds(o.url)) continue; // used / unofficial ads are evidence, never a retail offer
       const r = resolveRetailer(o);
       if (!retailers.has(r.id)) retailers.set(r.id, { id: r.id, tenant_id: EPHEMERAL_TENANT, name: r.name, trust: r.trust, return_days: r.return_days, cod: r.cod, base_url: r.base_url, affiliate_tag: null, source: 'crawl', known: r.known });
       const oid = `o-${id}-${r.id}`;
