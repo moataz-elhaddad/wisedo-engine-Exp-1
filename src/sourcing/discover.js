@@ -27,8 +27,8 @@ const withDeadline = (promise, ms, label) => {
   return Promise.race([promise, t]).finally(() => clearTimeout(timer));
 };
 
-function costOf(provider, usage) {
-  if (provider.role === 'llm') return estimateCost(provider.model, usage, provider.priceOverride);
+function costOf(provider, usage, model) {
+  if (provider.role === 'llm') return estimateCost(model || provider.model, usage, provider.priceOverride);
   const p = provider.priceOverride || SEARCH_PRICES[provider.name];
   if (!p || !usage) return { usd: null, basis: 'no price' };
   return { usd: Math.round((usage.credits || usage.search_calls || 0) * (p.per_call ?? p.per_search ?? 0) * 10000) / 10000, basis: p.basis };
@@ -49,8 +49,8 @@ export async function runProvider(provider, request, deadlineMs, clock = Date.no
   }
   const latency_ms = clock() - t0;
   const usage = res && res.usage ? res.usage : null;
-  const cost = costOf(provider, usage);
-  const base = { provider: provider.name, role: provider.role || 'llm', model: (res && res.model) || provider.model, latency_ms, usage, cost_usd: cost.usd, cost_basis: cost.basis, variant: res && res.variant, attempts: (res && res.attempts) || [], ...(res && res.warnings ? { warnings: res.warnings } : {}) };
+  const cost = costOf(provider, usage, res && res.model);
+  const base = { provider: provider.name, role: provider.role || 'llm', model: (res && res.model) || provider.model, latency_ms, usage, cost_usd: cost.usd, cost_basis: cost.basis, variant: res && res.variant, attempts: (res && res.attempts) || [], ...(res && res.model_attempts ? { model_attempts: res.model_attempts } : {}), ...(res && res.warnings ? { warnings: res.warnings } : {}) };
   if (!res || !res.ok) return { ...base, ok: false, error: (res && res.error) || 'no result', candidates: [], listings: [], rejected: [] };
   if (Array.isArray(res.listings)) {
     const listings = res.listings.filter((l) => l && l.url);

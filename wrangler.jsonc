@@ -21,8 +21,8 @@
       // Experiment B provider mix. Secrets: GEMINI_API_KEY, GROQ_API_KEY, COHERE_API_KEY, TAVILY_API_KEY, SERPER_API_KEY.
       // A provider without its secret is skipped and reported. Optional extra adapters: openai, anthropic.
       "DISCOVERY_PROVIDERS": "gemini,groq,cohere,tavily,serper",
-      "GEMINI_DISCOVERY_MODEL": "gemini-3.8-flash",
-      "GROQ_DISCOVERY_MODEL": "groq/compound",
+      "GEMINI_DISCOVERY_MODEL": "gemini-3.8-flash,gemini-3.8-flash-lite",
+      "GROQ_DISCOVERY_MODEL": "groq/compound,groq/compound-mini,compound-beta,compound-beta-mini",
       "COHERE_DISCOVERY_MODEL": "command-a-plus-05-2026",
       "DISCOVERY_WEB_SEARCH": "1",
       "DISCOVERY_TIMEOUT_MS": "90000",
@@ -54,8 +54,8 @@
       // Experiment B provider mix. Secrets: GEMINI_API_KEY, GROQ_API_KEY, COHERE_API_KEY, TAVILY_API_KEY, SERPER_API_KEY.
       // A provider without its secret is skipped and reported. Optional extra adapters: openai, anthropic.
       "DISCOVERY_PROVIDERS": "gemini,groq,cohere,tavily,serper",
-      "GEMINI_DISCOVERY_MODEL": "gemini-3.8-flash",
-      "GROQ_DISCOVERY_MODEL": "groq/compound",
+      "GEMINI_DISCOVERY_MODEL": "gemini-3.8-flash,gemini-3.8-flash-lite",
+      "GROQ_DISCOVERY_MODEL": "groq/compound,groq/compound-mini,compound-beta,compound-beta-mini",
       "COHERE_DISCOVERY_MODEL": "command-a-plus-05-2026",
       "DISCOVERY_WEB_SEARCH": "1",
       "DISCOVERY_TIMEOUT_MS": "90000",

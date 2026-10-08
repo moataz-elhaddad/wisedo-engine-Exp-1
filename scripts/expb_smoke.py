@@ -51,6 +51,9 @@ print("providers configured:", [(p["name"], p["role"], p["model"]) for p in stat
 print("providers missing:", [(p["name"], p["secret"]) for p in status["missing"]])
 print("experiment:", status.get("experiment"))
 
+dcode, diag = call("GET", "/api/expb/diagnose", auth=True, timeout=120)
+print("diagnose:", dcode, json.dumps(diag)[:4000] if diag else None)
+
 code, s1 = call("POST", "/api/session", {"event": {"type": "start", "text": TEXT}})
 assert code == 200, (code, s1)
 state, ui = s1["state"], s1["ui"]
@@ -85,6 +88,14 @@ for p in run["providers"]:
     print(f"  provider {p['provider']:<8} {p['role']:<10} {'OK  ' if p['ok'] else 'FAIL'} {p['latency_ms']/1000:6.1f}s "
           f"cands {p['candidate_count']:>2} listings {p.get('listing_count', 0):>2} usage {p.get('usage')} cost ${p.get('cost_usd')} "
           f"{p.get('variant') or ''} {p.get('error') or ''}")
+for p in run["providers"]:
+    if p.get("model_attempts"):
+        print(f"  {p['provider']} model attempts: {p['model_attempts']}")
+    if p.get("attempts"):
+        print(f"  {p['provider']} format attempts: {p['attempts']}")
+for r in run.get("raw", []):
+    for l in r.get("listings", [])[:12]:
+        print(f"  listing {r['provider']:<7} {l.get('kind'):<8} {str(l.get('price_text') or '')[:18]:<18} {str(l.get('title'))[:110]} | {str(l.get('url'))[:80]}")
 for e in run.get("evidence_runs", []):
     print(f"  evidence {e['provider']:<8} {'OK' if e['ok'] else 'FAIL'} {e['latency_ms']/1000:.1f}s listings {e['listing_count']} {e.get('error') or ''}")
 print("\nconsolidated:")

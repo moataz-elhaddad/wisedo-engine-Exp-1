@@ -9,7 +9,8 @@ import { createTavilyProvider, createSerperProvider, candidateQuery } from '../s
 import { parseListing, parsePrice, listingCandidate, listingMatches, isEgyptian } from '../src/sourcing/listings.js';
 import { buildDiscoveryRequest } from '../src/sourcing/discovery-prompt.js';
 import { normalizeProviderOutput } from '../src/sourcing/normalize.js';
-import { consolidate } from '../src/sourcing/consolidate.js';
+import { consolidate, gpuToken } from '../src/sourcing/consolidate.js';
+const gpuTokenOf = (c) => gpuToken(c.gpu, c.cpu);
 import { attachEvidence } from '../src/sourcing/evidence.js';
 import { discoverProducts, runProvider } from '../src/sourcing/discover.js';
 import { LLMProductDiscoverySource, recommendWith } from '../src/sourcing/product-source.js';
@@ -38,38 +39,43 @@ test('default mix is 3 LLM families + 1 web search + 1 shopping; each provider i
 
 // --- Cohere --------------------------------------------------------------------------------------------------
 
-test('Cohere adapter: v2 chat with JSON schema mode, model command-a-plus-05-2026, billed usage read', async () => {
+test('Cohere adapter: v2 chat, JSON mode with the schema in the prompt first, model command-a-plus-05-2026, billed usage', async () => {
   const f = F.fakeFetch({ cohere: F.cohereResponse([F.X, F.Z]) });
   const r = await createCohereProvider({ apiKey: 'co-SECRET', fetch: f }).discover(REQ);
   assert.equal(r.ok, true);
-  assert.equal(r.variant, 'json_schema');
+  assert.equal(r.variant, 'json_object');
   assert.equal(r.output.candidates.length, 2);
   assert.deepEqual(r.usage, { input_tokens: 3500, output_tokens: 1400, web_searches: 0 });
   const c = f.calls[0];
   assert.equal(c.url, 'https://api.cohere.com/v2/chat');
   assert.equal(c.body.model, 'command-a-plus-05-2026');
-  assert.equal(c.body.response_format.type, 'json_object');
-  assert.equal(c.body.response_format.json_schema.type, 'object');
+  assert.deepEqual(c.body.response_format, { type: 'json_object' });
+  assert.match(c.body.messages[1].content, /JSON schema/);
   assert.equal(c.body.messages[0].role, 'system');
   assert.equal(c.headers.authorization, 'Bearer co-SECRET');
   assert.ok(!JSON.stringify(r).includes('co-SECRET'));
 });
 
-test('Cohere adapter: schema rejected (400) falls back to plain JSON mode with the schema in the prompt', async () => {
-  const f = F.fakeFetch({ cohere: (body) => (body.response_format && body.response_format.json_schema
-    ? new Response(JSON.stringify({ message: 'invalid json_schema' }), { status: 400 })
+test('Cohere adapter: runaway output (MAX_TOKENS) moves to the next format and its tokens are still counted', async () => {
+  const f = F.fakeFetch({ cohere: (body) => (body.response_format && body.response_format.type === 'json_object' && !body.response_format.json_schema
+    ? new Response(JSON.stringify(F.cohereResponse([], { finish_reason: 'MAX_TOKENS', usage: { billed_units: { input_tokens: 400, output_tokens: 6000 } } })), { status: 200 })
     : new Response(JSON.stringify(F.cohereResponse([F.Y])), { status: 200 })) });
   const r = await createCohereProvider({ apiKey: 'k', fetch: f }).discover(REQ);
   assert.equal(r.ok, true);
-  assert.equal(r.variant, 'json_object');
-  assert.match(f.calls[1].body.messages[1].content, /JSON schema/);
+  assert.equal(r.variant, 'json_schema');
   assert.equal(r.attempts[0].ok, false);
+  assert.match(r.attempts[0].error, /runaway/);
+  assert.equal(r.usage.output_tokens, 6000 + 1400, 'the runaway tokens are part of the cost');
+  assert.equal(f.calls[1].body.response_format.json_schema.type, 'object');
 });
 
-test('Cohere adapter: MAX_TOKENS, prose, auth error and timeout are failures that never leak the key', async () => {
-  const cut = await createCohereProvider({ apiKey: 'k', fetch: F.fakeFetch({ cohere: F.cohereResponse([], { finish_reason: 'MAX_TOKENS' }) }) }).discover(REQ);
+test('Cohere adapter: schema rejected (400) and runaway everywhere end in a reported failure; auth errors are not retried', async () => {
+  const run = (finish) => createCohereProvider({ apiKey: 'k', fetch: F.fakeFetch({ cohere: F.cohereResponse([], { finish_reason: finish }) }) }).discover(REQ);
+  const cut = await run('MAX_TOKENS');
   assert.equal(cut.ok, false);
-  assert.equal(cut.stopReason, 'max_tokens');
+  assert.match(cut.error, /max_tokens/);
+  assert.equal(cut.attempts.length, 3);
+  assert.ok(cut.usage.output_tokens > 0);
   const prose = await createCohereProvider({ apiKey: 'k', fetch: F.fakeFetch({ cohere: F.cohereResponse([], { message: { content: [{ type: 'text', text: 'Buy the IdeaPad.' }] } }) }) }).discover(REQ);
   assert.equal(prose.ok, false);
   assert.match(prose.error, /not JSON/);
@@ -83,6 +89,50 @@ test('Cohere adapter: MAX_TOKENS, prose, auth error and timeout are failures tha
   assert.match(slow.error, /timeout/);
   assert.equal(slow.provider, 'cohere');
   assert.equal(typeof slow.latency_ms, 'number');
+});
+
+test('model fallback: a model that does not exist (404) or is out of quota (429) moves to the next configured model', async () => {
+  const f = F.fakeFetch({
+    groq: (body) => (body.model === 'groq/compound' ? new Response('{"error":{"message":"The model `groq/compound` does not exist"}}', { status: 404 }) : new Response(JSON.stringify(F.groqResponse([F.X], { model: body.model })), { status: 200 })),
+    gemini: () => new Response('{"error":{"status":"RESOURCE_EXHAUSTED","message":"quota"}}', { status: 429 }),
+  });
+  const [groq] = providersFromEnv({ DISCOVERY_PROVIDERS: 'groq', GROQ_API_KEY: 'k', GROQ_DISCOVERY_MODEL: 'groq/compound,compound-beta' }, { fetch: f }).available;
+  const r = await runProvider(groq, REQ, 5000);
+  assert.equal(r.ok, true);
+  assert.equal(r.model, 'compound-beta');
+  assert.deepEqual(r.model_attempts.map((x) => [x.model, x.ok]), [['groq/compound', false], ['compound-beta', true]]);
+  const [gem] = providersFromEnv({ DISCOVERY_PROVIDERS: 'gemini', GEMINI_API_KEY: 'k', GEMINI_DISCOVERY_MODEL: 'a-model,b-model' }, { fetch: f }).available;
+  const g = await runProvider(gem, REQ, 5000);
+  assert.equal(g.ok, false);
+  assert.equal(g.model_attempts.length, 2, 'both models tried on 429');
+  const one = providersFromEnv({ DISCOVERY_PROVIDERS: 'cohere', COHERE_API_KEY: 'k' }).available[0];
+  assert.equal(one.model, 'command-a-plus-05-2026');
+});
+
+test('shop titles without a GPU are integrated (flagged), never when a dedicated card is named', () => {
+  const t = { provider: 'serper', kind: 'shopping', title: 'Lenovo IdeaPad Slim 3 15IAH8 - Core i5-12450H, 16GB, 512GB SSD', url: 'https://www.amazon.eg/x', price_text: 'EGP 32,000' };
+  const c = listingCandidate(parseListing(t), 'now');
+  assert.equal(c.gpu_assumed, true);
+  assert.equal(gpuTokenOf(c), 'integrated');
+  const d = listingCandidate(parseListing({ ...t, title: 'HP Victus 15 - Ryzen 5 7535HS 16GB 512GB NVIDIA GeForce' }), 'now');
+  assert.equal(d, null, 'a dedicated card is mentioned without a model: configuration unknown, not a candidate');
+});
+
+test('diagnose route lists models and tiny-request status codes, never key values', async () => {
+  const { diagnoseProviders } = await import('../src/sourcing/diagnose.js');
+  const f = async (url, init = {}) => {
+    const u = String(url);
+    if (u.includes('/v1beta/models?')) return new Response(JSON.stringify({ models: [{ name: 'models/gemini-3.8-flash-lite', supportedGenerationMethods: ['generateContent'] }] }));
+    if (u.includes('api.groq.com/openai/v1/models')) return new Response(JSON.stringify({ data: [{ id: 'compound-beta' }] }));
+    if (u.includes('api.cohere.com/v1/models')) return new Response(JSON.stringify({ models: [{ name: 'command-a-plus-05-2026' }] }));
+    return new Response('{"error":{"message":"nope"}}', { status: init.method === 'POST' && u.includes('gemini-3.8-flash:') ? 429 : 200 });
+  };
+  const d = await diagnoseProviders({ GEMINI_API_KEY: 'g-SECRET', GROQ_API_KEY: 'q-SECRET', COHERE_API_KEY: 'c-SECRET' }, { fetch: f });
+  assert.deepEqual(d.gemini.models, ['gemini-3.8-flash-lite']);
+  assert.equal(d.gemini.tries['gemini-3.8-flash'].plain.status, 429);
+  assert.deepEqual(d.groq.models, ['compound-beta']);
+  assert.deepEqual(d.cohere.models, ['command-a-plus-05-2026']);
+  assert.ok(!/SECRET/.test(JSON.stringify(d)));
 });
 
 test('Cohere observability: cost estimate uses the command-a-plus row; usage and latency are reported', async () => {

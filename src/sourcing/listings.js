@@ -144,13 +144,18 @@ export function parseListing(l) {
 /** A listing that is a full configuration with an EGP price, as a normalised candidate (normalize.js shape). */
 export function listingCandidate(p, now) {
   if (!p.brand || !p.model || p.price_egp === null) return null;
+  // Shop titles rarely name integrated graphics. With a laptop CPU named and no dedicated card anywhere in the text,
+  // the GPU is taken as integrated (flagged gpu_assumed). Dedicated cards are always named in Egyptian shop titles.
+  const dedicatedMentioned = /rtx|gtx|radeon\s*rx|\barc\s*a\d|nvidia|geforce|\bmx\s*\d{3}/i.test(`${p.title} ${p.snippet || ''}`);
+  const gpuAssumed = !p.gpu && p.cpu && !dedicatedMentioned;
+  if (gpuAssumed) p = { ...p, gpu: 'integrated graphics (assumed: none named)' };
   const c = {
     provider: p.provider, brand: canonicalBrand(p.brand), model: p.model, mpn: null, cpu: p.cpu, ram_gb: p.ram_gb, storage_gb: p.storage_gb,
     gpu: p.gpu || null, display: p.display, screen_inches: null, os: null, weight_kg: null, battery_hours: null, warranty_months: null,
     price_egp: p.price_egp, currency: 'EGP', price_basis: 'listing', availability: 'listed', grey_import: null,
     offers: [{ retailer: p.retailer, url: p.url, price_egp: p.price_egp, source: 'listing' }],
     fit_reasons: [], confidence: null, evidence: `${p.kind} listing: ${p.title}`.slice(0, 300),
-    evidence_urls: [p.url].filter(Boolean), timestamp: now || null, from_listing: true,
+    evidence_urls: [p.url].filter(Boolean), timestamp: now || null, from_listing: true, ...(gpuAssumed ? { gpu_assumed: true } : {}),
   };
   return signature(c) ? c : null;
 }

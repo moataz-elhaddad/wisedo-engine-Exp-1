@@ -14,8 +14,8 @@ import { postJson, ProviderError } from './http.js';
 import { createTavilyProvider, createSerperProvider } from './search-providers.js';
 
 export const DEFAULT_MODELS = {
-  gemini: 'gemini-3.8-flash',
-  groq: 'groq/compound',
+  gemini: 'gemini-3.8-flash,gemini-3.8-flash-lite',
+  groq: 'groq/compound,groq/compound-mini,compound-beta,compound-beta-mini',
   cohere: 'command-a-plus-05-2026',
   openai: 'gpt-5',
   anthropic: 'claude-opus-5-5',
@@ -38,6 +38,8 @@ export const PRICES = {
   'gpt-5-mini': { in: 0.25, out: 2, per_search: 0.01, basis: 'assumption (check OpenAI pricing)' },
   'gemini-3.8-flash': { in: 0.3, out: 2.5, per_search: 0.035, basis: 'paid-equivalent assumption; $0 on the AI Studio free tier' },
   'groq/compound': { in: 0.15, out: 0.6, per_search: 0.008, basis: 'paid-equivalent assumption; $0 on the Groq free tier' },
+  'groq/compound-mini': { in: 0.15, out: 0.6, per_search: 0.008, basis: 'paid-equivalent assumption; $0 on the Groq free tier' },
+  'gemini-3.8-flash-lite': { in: 0.1, out: 0.4, per_search: 0.035, basis: 'paid-equivalent assumption; $0 on the AI Studio free tier' },
   'command-a-plus-05-2026': { in: 2.5, out: 10, per_search: 0, basis: 'paid-equivalent assumption (Command A list price); $0 on a Cohere trial key (1,000 calls/month)' },
 };
 
@@ -76,22 +78,55 @@ export function stripKeywords(schema, keys) {
 }
 
 /** Try request variants in order; move to the next only when the provider rejects the request shape (HTTP 400). */
-async function runVariants(variants, call) {
+async function runVariants(variants, call, retryOn = (e) => e instanceof ProviderError && e.status === 400) {
   const attempts = [];
   let lastErr = null;
+  // Tokens spent by failed attempts (e.g. a runaway answer) still cost money: add them to the reported usage.
+  const spent = { input_tokens: 0, output_tokens: 0, web_searches: 0 };
+  const add = (u) => { if (u) for (const k of Object.keys(spent)) spent[k] += u[k] || 0; };
+  const merged = (u) => (spent.input_tokens || spent.output_tokens ? { ...(u || {}), input_tokens: ((u && u.input_tokens) || 0) + spent.input_tokens, output_tokens: ((u && u.output_tokens) || 0) + spent.output_tokens, web_searches: ((u && u.web_searches) || 0) + spent.web_searches } : u);
   for (const v of variants) {
     try {
       const r = await call(v);
       attempts.push({ variant: v.name, ok: true });
-      return { ...r, variant: v.name, attempts };
+      return { ...r, usage: merged(r.usage), variant: v.name, attempts };
     } catch (e) {
       attempts.push({ variant: v.name, ok: false, error: String(e.message).slice(0, 200) });
+      add(e.usage);
       lastErr = e;
-      if (!(e instanceof ProviderError) || e.status !== 400) break;
+      if (!retryOn(e)) break;
     }
   }
-  return { ok: false, error: lastErr ? String(lastErr.message) : 'no variant', attempts };
+  return { ok: false, error: lastErr ? String(lastErr.message) : 'no variant', attempts, ...(spent.output_tokens ? { usage: merged(null) } : {}) };
 }
+
+/**
+ * Model fallback: a provider configured with "model-a,model-b" tries model-a first and moves to model-b only when
+ * the provider says the model does not exist for this key (404) or its quota is used up (429). Each attempt is kept.
+ * @param {string[]} models
+ * @param {(model: string) => any} make  adapter factory for one model
+ */
+export function withModelFallback(models, make) {
+  const list = models.filter(Boolean);
+  const first = make(list[0]);
+  if (list.length < 2) return first;
+  return {
+    ...first,
+    models: list,
+    async discover(req) {
+      const tried = [];
+      let res;
+      for (const m of list) {
+        res = await make(m).discover(req);
+        tried.push({ model: m, ok: !!res.ok, ...(res.ok ? {} : { error: String(res.error || '').slice(0, 160) }) });
+        if (res.ok || !/HTTP (404|429)|does not exist|not found|RESOURCE_EXHAUSTED|quota/i.test(String(res.error || ''))) break;
+      }
+      return { ...res, model_attempts: tried, model: res.model || tried[tried.length - 1].model };
+    },
+  };
+}
+
+const modelList = (v, dflt) => String(v || dflt).split(',').map((x) => x.trim()).filter(Boolean);
 
 // ---------------------------------------------------------------------------------------------------------------
 // Anthropic (Messages API, web_search server tool, structured output via output_config.format)
@@ -208,7 +243,7 @@ export function createOpenAiProvider(opts) {
  * @param {{apiKey: string, model?: string, fetch?: typeof fetch, timeoutMs?: number, webSearch?: boolean}} opts
  */
 export function createGeminiProvider(opts) {
-  const model = opts.model || DEFAULT_MODELS.gemini;
+  const model = opts.model || DEFAULT_MODELS.gemini.split(',')[0];
   const doFetch = opts.fetch || ((...a) => fetch(...a));
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const search = opts.webSearch !== false;
@@ -282,8 +317,10 @@ export function createCohereProvider(opts) {
   const model = opts.model || DEFAULT_MODELS.cohere;
   const doFetch = opts.fetch || ((...a) => fetch(...a));
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  // JSON schema mode first; a model or account that rejects the schema falls back to plain JSON mode, then to text.
-  const variants = [{ name: 'json_schema', format: 'schema' }, { name: 'json_object', format: 'object' }, { name: 'plain', format: null }];
+  // JSON mode with the schema in the prompt first (schema-constrained mode produced runaway output in the live
+  // check); then strict schema mode, then plain text. A rejected request (400) or a runaway answer (max_tokens)
+  // moves on to the next format.
+  const variants = [{ name: 'json_object', format: 'object' }, { name: 'json_schema', format: 'schema' }, { name: 'plain', format: null }];
   return {
     name: 'cohere', role: 'llm', model,
     async discover(req) {
@@ -298,12 +335,12 @@ export function createCohereProvider(opts) {
         }, timeoutMs, 'cohere');
         const a = cohereAnswer(data);
         const usage = { ...a.usage, web_searches: 0 };
-        if (a.finish === 'max_tokens') return { ok: false, error: 'cohere: max_tokens', stopReason: 'max_tokens', model, usage };
+        if (a.finish === 'max_tokens') throw Object.assign(new ProviderError('cohere: max_tokens (runaway output)', 0), { runaway: true, usage });
         if (a.finish === 'error' || a.finish === 'timeout') return { ok: false, error: `cohere: finish_reason ${a.finish}`, stopReason: a.finish, model, usage };
         const output = parseJsonObject(a.text);
         if (!output) return { ok: false, error: 'cohere: answer is not JSON', stopReason: 'end_turn', model, usage };
         return { ok: true, output, stopReason: 'end_turn', model, usage };
-      });
+      }, (e) => e instanceof ProviderError && (e.status === 400 || e.runaway === true));
     },
   };
 }
@@ -316,7 +353,7 @@ export function createCohereProvider(opts) {
  * @param {{apiKey: string, model?: string, fetch?: typeof fetch, timeoutMs?: number, webSearch?: boolean}} opts
  */
 export function createGroqProvider(opts) {
-  const model = opts.model || DEFAULT_MODELS.groq;
+  const model = opts.model || DEFAULT_MODELS.groq.split(',')[0];
   const doFetch = opts.fetch || ((...a) => fetch(...a));
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const variants = [{ name: 'search_settings', settings: true }, { name: 'plain', settings: false }];
@@ -345,9 +382,9 @@ export function createGroqProvider(opts) {
 
 /** Every provider this module can build: role, secret, factory. Add a provider by adding one row. */
 export const PROVIDER_REGISTRY = {
-  gemini: { role: 'llm', secret: 'GEMINI_API_KEY', make: (o, env) => createGeminiProvider({ ...o, model: env.GEMINI_DISCOVERY_MODEL || env.GEMINI_MODEL }) },
-  groq: { role: 'llm', secret: 'GROQ_API_KEY', make: (o, env) => createGroqProvider({ ...o, model: env.GROQ_DISCOVERY_MODEL }) },
-  cohere: { role: 'llm', secret: 'COHERE_API_KEY', make: (o, env) => createCohereProvider({ ...o, model: env.COHERE_DISCOVERY_MODEL }) },
+  gemini: { role: 'llm', secret: 'GEMINI_API_KEY', make: (o, env) => withModelFallback(modelList(env.GEMINI_DISCOVERY_MODEL || env.GEMINI_MODEL, DEFAULT_MODELS.gemini), (m) => createGeminiProvider({ ...o, model: m })) },
+  groq: { role: 'llm', secret: 'GROQ_API_KEY', make: (o, env) => withModelFallback(modelList(env.GROQ_DISCOVERY_MODEL, DEFAULT_MODELS.groq), (m) => createGroqProvider({ ...o, model: m })) },
+  cohere: { role: 'llm', secret: 'COHERE_API_KEY', make: (o, env) => withModelFallback(modelList(env.COHERE_DISCOVERY_MODEL, DEFAULT_MODELS.cohere), (m) => createCohereProvider({ ...o, model: m })) },
   tavily: { role: 'web_search', secret: 'TAVILY_API_KEY', make: (o) => createTavilyProvider({ ...o, timeoutMs: Math.min(o.timeoutMs, 25_000) }) },
   serper: { role: 'shopping', secret: 'SERPER_API_KEY', make: (o) => createSerperProvider({ ...o, timeoutMs: Math.min(o.timeoutMs, 25_000) }) },
   openai: { role: 'llm', secret: 'OPENAI_API_KEY', make: (o, env) => createOpenAiProvider({ ...o, model: env.OPENAI_DISCOVERY_MODEL }) },

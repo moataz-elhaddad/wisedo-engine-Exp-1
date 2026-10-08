@@ -11,6 +11,7 @@
 // Nothing discovered is written to the catalog tables; only a run log row (metrics + Top 3) goes to expb_runs.
 import { validateNeedProfile } from '../src/contracts.js';
 import { providersFromEnv } from '../src/sourcing/providers.js';
+import { diagnoseProviders } from '../src/sourcing/diagnose.js';
 import { LLMProductDiscoverySource, ExistingCatalogProductSource, recommendWith } from '../src/sourcing/product-source.js';
 import { CONFIGS } from './bundle.js';
 import * as store from './store.js';
@@ -62,6 +63,10 @@ export async function expbRoute(env, request, h, b) {
     if (!h.tokenOk(env, request)) throw new h.HttpError(401, 'admin token required');
     const rows = await env.DB.prepare('SELECT * FROM expb_runs ORDER BY created_at DESC LIMIT 50').all();
     return h.json(rows.results.map((r) => ({ ...r, profile: JSON.parse(r.profile), providers: JSON.parse(r.providers), top3: JSON.parse(r.top3), catalog_top3: JSON.parse(r.catalog_top3) })));
+  }
+  if (m === 'GET' && b === 'diagnose') {
+    if (!h.tokenOk(env, request)) throw new h.HttpError(401, 'admin token required');
+    return h.json({ ok: true, providers: await diagnoseProviders(env) });
   }
   if (m === 'POST' && b === 'run') return runHandler(env, request, h);
   throw new h.HttpError(404, `no route ${m} /api/expb/${b || ''}`);
