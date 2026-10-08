@@ -412,3 +412,18 @@ test('a listing-only lead without a structured price becomes a candidate, and ve
   assert.equal(blocked[0].status, 'discovered_unverified');
   assert.equal(blocked[0].exclusion_reason, 'no_egyptian_price');
 });
+
+test('live regression: a candidate made from an evidence listing keeps its own URL as an offer lead (searched for another candidate)', async () => {
+  const { evidenceCandidates } = await import('../src/sourcing/discover.js');
+  const products = consolidate([norm(F.X, 'cohere')], ['cohere']);
+  const url = 'https://www.compumarts.com/products/asus-rog-strix-g15-g513qc-hn163t-ryzen-7-5800h-16gb-512gb-rtx-3050';
+  const lead = { provider: 'serper', kind: 'web', for_key: products[0].key, title: 'ASUS ROG Strix G15 G513QC-HN163T Ryzen 7 5800H 16GB 512GB RTX 3050', url };
+  products.push(...evidenceCandidates(products, [{ listings: [lead] }], F.NOW, ['cohere', 'serper']));
+  const page = `<html><title>ASUS ROG Strix G15 G513QC-HN163T Ryzen 7 5800H 16GB 512GB RTX 3050</title><script type="application/ld+json">{"offers":{"price":"36999","priceCurrency":"EGP"}}</script></html>`;
+  collectOffers(products, [lead]);
+  await verifyOffers(products, { fetch: F.fakeFetch({}, { [url]: page }) });
+  const g15 = products.find((p) => p.found_via === 'evidence_search');
+  assert.equal(g15.status, 'verified');
+  assert.equal(g15.verified_product_url, url);
+  assert.equal(g15.verified_price, 36999);
+});

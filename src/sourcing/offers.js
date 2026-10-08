@@ -50,8 +50,10 @@ export function collectOffers(products, listings, opts = {}) {
     const potential = new Map();
     const reject = (reason, url, detail) => p.rejections.push({ reason, url: url || null, ...(detail ? { detail } : {}) });
 
+    // A candidate made from a listing owns that listing's URL, even when the search was run for another candidate.
+    const ownUrls = new Set((p.offers || []).filter((o) => o.source === 'listing' && o.url).map((o) => o.url));
     for (const l of parsed) {
-      const mine = l.for_key === p.key;
+      const mine = l.for_key === p.key || ownUrls.has(l.url);
       if (l.for_key && !mine) continue;
       const m = listingMatches(p, l);
       if (!m.match) {
