@@ -125,16 +125,18 @@ export function pageOffer(html, url = '') {
   // Amazon has no JSON-LD offer: its buy box carries the price ("priceAmount" / the core price block) and its
   // #availability block the stock. Only on Amazon's own pages.
   if (/(^|\.)amazon\.eg$/i.test(hostOf(url))) {
-    const pa = html.match(/"priceAmount"\s*:\s*([\d.]+)/) || html.match(/id=["']corePrice(?:Display_desktop)?_feature_div["'][\s\S]{0,4000}?class=["']a-offscreen["']>\s*(?:EGP|ج\.م\.?)(?:\s|&nbsp;)*([\d,.]+)/);
-    const azA = html.match(/id=["']availability["'][\s\S]{0,600}?(Currently unavailable|In Stock|غير متوفر حاليًا|متوفر)/i);
-    if (pa && num(pa[1])) return { price: num(pa[1]), currency: 'EGP', availability: azA ? (/unavailable|غير متوفر/i.test(azA[1]) ? 'out_of_stock' : 'in_stock') : null, source: 'amazon-buybox' };
-  }
-  if (/(^|\.)amazon\.eg$/i.test(hostOf(url))) {
-    // No buy-box price: record which markers the page had (diagnostics; an Amazon page with no featured offer is common).
-    const near = (needle, n = 260) => { const i = html.indexOf(needle); return i < 0 ? null : html.slice(i, i + n).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').slice(0, 160); };
-    const hints = { bytes: html.length, priceAmount: html.includes('priceAmount'), corePrice: near('id="corePrice'), aOffscreen: near('class="a-offscreen"', 120), availability: near('id="availability"', 400), captcha: /captcha/i.test(html.slice(0, 50000)) };
-    const azA = html.match(/id=["']availability["'][\s\S]{0,600}?(Currently unavailable|In Stock|غير متوفر حاليًا|متوفر)/i);
-    return { price: null, currency: null, availability: azA ? (/unavailable|غير متوفر/i.test(azA[1]) ? 'out_of_stock' : 'in_stock') : null, source: azA ? 'amazon-availability' : null, hints };
+    // Only the price-to-pay inside the core price block is this product's price: other a-offscreen prices on the page
+    // belong to widgets (live: three different G14 listings all showed the same 85,945.43 from one).
+    const i = html.indexOf('id="corePrice_desktop"') >= 0 ? html.indexOf('id="corePrice_desktop"') : html.indexOf('id="corePriceDisplay_desktop_feature_div"');
+    const block = i >= 0 ? html.slice(i, i + 6000) : '';
+    const pa = block.match(/(?:apexPriceToPay|priceToPay)[\s\S]{0,400}?class=["']a-offscreen["'][^>]*>\s*(?:EGP|ج\.م\.?)(?:\s|&nbsp;)*([\d,.]+)/);
+    const j = html.indexOf('id="availability"');
+    const at = j >= 0 ? html.slice(j, j + 2500).replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ') : '';
+    const availability = /Currently unavailable|غير متوفر/i.test(at) ? 'out_of_stock' : /In Stock|left in stock|متوفر/i.test(at) ? 'in_stock' : null;
+    if (pa && num(pa[1])) return { price: num(pa[1]), currency: 'EGP', availability, source: 'amazon-buybox' };
+    const near = (needle, n = 260) => { const k = html.indexOf(needle); return k < 0 ? null : html.slice(k, k + n).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').slice(0, 160); };
+    // No featured offer (common for older models): diagnostics only.
+    return { price: null, currency: null, availability, source: availability ? 'amazon-availability' : null, hints: { bytes: html.length, core: block ? block.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').slice(0, 200) : null, availability: at.slice(0, 160) } };
   }
   const az = html.match(/id=["']availability["'][\s\S]{0,600}?(Currently unavailable|In Stock|غير متوفر حاليًا|متوفر)/i);
   return { price: null, currency: null, availability: az ? (/unavailable|غير متوفر/i.test(az[1]) ? 'out_of_stock' : 'in_stock') : null, source: az ? 'amazon-availability' : null };

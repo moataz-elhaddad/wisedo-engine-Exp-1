@@ -449,9 +449,12 @@ test('accessories that name the laptop model (battery, keyboard, charger, screen
 
 test('Amazon.eg: the price comes from the buy box and stock from #availability (it has no JSON-LD offer)', async () => {
   const { pageOffer } = await import('../src/sourcing/verify.js');
-  const html = '<div id="corePriceDisplay_desktop_feature_div"><span class="a-price"><span class="a-offscreen">EGP&nbsp;36,999.00</span></span></div><div id="availability"><span>In Stock</span></div>';
+  const widget = '<div class="similar"><span class="a-price"><span class="a-offscreen">EGP85,945.43 EGP</span></span></div>';
+  const html = `${widget}<div id="corePrice_desktop" class="celwidget"><span class="a-price a-text-price apexPriceToPay" data-a-size="b"><span class="a-offscreen">EGP36,999.00 EGP</span></span></div><div id="availability" data-csa-c-slot-id="availability_feature_div"> <div id="all"><span class="a-size-medium a-color-success"> In Stock </span></div></div>`;
   assert.deepEqual(pageOffer(html, 'https://www.amazon.eg/dp/B0D1234567'), { price: 36999, currency: 'EGP', availability: 'in_stock', source: 'amazon-buybox' });
-  assert.equal(pageOffer('{"priceAmount":41250.00}', 'https://www.amazon.eg/dp/B0D1234567').price, 41250);
+  const noOffer = pageOffer(`${widget}<div id="corePrice_desktop"></div><div id="availability"><span>Currently unavailable.</span></div>`, 'https://www.amazon.eg/dp/B0D1234567');
+  assert.equal(noOffer.price, null, 'a widget price is never the product price');
+  assert.equal(noOffer.availability, 'out_of_stock');
   assert.equal(pageOffer(html, 'https://example.com/x').price, null, 'buy-box rules only on Amazon');
 });
 
