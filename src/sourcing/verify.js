@@ -8,7 +8,7 @@
 // Per URL status: verified | partial | mismatch | unavailable | blocked | unreachable | error
 // Candidate status: best URL status, or "no_url" / "not_checked".
 import { modelTokens, cpuToken } from './consolidate.js';
-import { looksLikeProductPage, isClassifieds } from './listings.js';
+import { looksLikeProductPage, isClassifieds, isAccessoryTitle } from './listings.js';
 
 // Amazon product pages are 1-2 MB and their buy box sits past the first 600 KB.
 export const VERIFY_DEFAULTS = { maxUrls: 20, timeoutMs: 6000, maxBytes: 2_000_000 };
@@ -131,7 +131,8 @@ export function pageOffer(html, url = '') {
   }
   if (/(^|\.)amazon\.eg$/i.test(hostOf(url))) {
     // No buy-box price: record which markers the page had (diagnostics; an Amazon page with no featured offer is common).
-    const hints = { bytes: html.length, priceAmount: html.includes('priceAmount'), corePrice: /corePrice/.test(html), aOffscreen: html.includes('a-offscreen'), availability: html.includes('id="availability"'), captcha: /captcha/i.test(html.slice(0, 50000)) };
+    const near = (needle, n = 260) => { const i = html.indexOf(needle); return i < 0 ? null : html.slice(i, i + n).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').slice(0, 160); };
+    const hints = { bytes: html.length, priceAmount: html.includes('priceAmount'), corePrice: near('id="corePrice'), aOffscreen: near('class="a-offscreen"', 120), availability: near('id="availability"', 400), captcha: /captcha/i.test(html.slice(0, 50000)) };
     const azA = html.match(/id=["']availability["'][\s\S]{0,600}?(Currently unavailable|In Stock|غير متوفر حاليًا|متوفر)/i);
     return { price: null, currency: null, availability: azA ? (/unavailable|غير متوفر/i.test(azA[1]) ? 'out_of_stock' : 'in_stock') : null, source: azA ? 'amazon-availability' : null, hints };
   }
@@ -199,7 +200,7 @@ export async function verifyUrl(url, cand, opts = {}) {
     const specOk = specChecks.every(Boolean);
     const prices = pagePrices(html);
     let status;
-    if (!cmp.brand || (cmp.modelShare < 0.4 && !cmp.mpn)) status = 'mismatch';
+    if (!cmp.brand || (cmp.modelShare < 0.4 && !cmp.mpn) || isAccessoryTitle(title)) status = 'mismatch';
     else if ((cmp.mpn || cmp.modelShare >= 0.6) && specOk) status = 'verified';
     else status = 'partial';
     const offer = pageOffer(html, res.url || url);
