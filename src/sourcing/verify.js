@@ -10,7 +10,8 @@
 import { modelTokens, cpuToken } from './consolidate.js';
 import { looksLikeProductPage, isClassifieds } from './listings.js';
 
-export const VERIFY_DEFAULTS = { maxUrls: 12, timeoutMs: 5000, maxBytes: 600_000 };
+// Amazon product pages are 1-2 MB and their buy box sits past the first 600 KB.
+export const VERIFY_DEFAULTS = { maxUrls: 20, timeoutMs: 6000, maxBytes: 2_000_000 };
 const USER_AGENT = 'Mozilla/5.0 (compatible; WisedoExp1-LinkCheck/0.1; product-availability experiment)';
 
 const RANK = { verified: 6, partial: 5, unavailable: 4, mismatch: 3, blocked: 2, unreachable: 1, error: 1, not_checked: 0, no_url: 0 };
@@ -127,6 +128,12 @@ export function pageOffer(html, url = '') {
     const pa = html.match(/"priceAmount"\s*:\s*([\d.]+)/) || html.match(/id=["']corePrice(?:Display_desktop)?_feature_div["'][\s\S]{0,4000}?class=["']a-offscreen["']>\s*(?:EGP|ج\.م\.?)(?:\s|&nbsp;)*([\d,.]+)/);
     const azA = html.match(/id=["']availability["'][\s\S]{0,600}?(Currently unavailable|In Stock|غير متوفر حاليًا|متوفر)/i);
     if (pa && num(pa[1])) return { price: num(pa[1]), currency: 'EGP', availability: azA ? (/unavailable|غير متوفر/i.test(azA[1]) ? 'out_of_stock' : 'in_stock') : null, source: 'amazon-buybox' };
+  }
+  if (/(^|\.)amazon\.eg$/i.test(hostOf(url))) {
+    // No buy-box price: record which markers the page had (diagnostics; an Amazon page with no featured offer is common).
+    const hints = { bytes: html.length, priceAmount: html.includes('priceAmount'), corePrice: /corePrice/.test(html), aOffscreen: html.includes('a-offscreen'), availability: html.includes('id="availability"'), captcha: /captcha/i.test(html.slice(0, 50000)) };
+    const azA = html.match(/id=["']availability["'][\s\S]{0,600}?(Currently unavailable|In Stock|غير متوفر حاليًا|متوفر)/i);
+    return { price: null, currency: null, availability: azA ? (/unavailable|غير متوفر/i.test(azA[1]) ? 'out_of_stock' : 'in_stock') : null, source: azA ? 'amazon-availability' : null, hints };
   }
   const az = html.match(/id=["']availability["'][\s\S]{0,600}?(Currently unavailable|In Stock|غير متوفر حاليًا|متوفر)/i);
   return { price: null, currency: null, availability: az ? (/unavailable|غير متوفر/i.test(az[1]) ? 'out_of_stock' : 'in_stock') : null, source: az ? 'amazon-availability' : null };
