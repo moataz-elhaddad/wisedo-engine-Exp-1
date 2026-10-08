@@ -11,8 +11,11 @@
     "generate": "node data/generate.js",
     "test": "node --test test/",
     "build": "sh web/build.sh dist",
-    "deploy": "sh web/build.sh dist && wrangler deploy",
-    "db:remote": "wrangler d1 migrations apply wisedo-engine-exp-1 --remote"
+    "deploy": "node scripts/check-isolation.mjs && sh web/build.sh dist && wrangler deploy",
+    "db:remote": "node scripts/check-isolation.mjs && wrangler d1 migrations apply wisedo-engine-exp-1 --remote",
+    "isolation": "node scripts/check-isolation.mjs && node scripts/check-isolation.mjs --env staging",
+    "deploy:staging": "node scripts/check-isolation.mjs --env staging && sh web/build.sh dist && wrangler deploy --env staging",
+    "db:remote:staging": "node scripts/check-isolation.mjs --env staging && wrangler d1 migrations apply wisedo-engine-exp-1-staging --remote --env staging"
   },
   "devDependencies": {
     "wrangler": "^4.0.0"

@@ -33,8 +33,8 @@
 </head>
 <body>
 <main>
-  <h1>Wisedo Experiment B: multi-LLM product sourcing</h1>
-  <div class="sub">Same Customer Need Engine and Recommendation Engine. Only the product source changes: the final Top 3 is ranked from products suggested by LLM providers, not from the catalog. Experiment, not the product.</div>
+  <h1>Wisedo Experiment B: multi-source product sourcing</h1>
+  <div class="sub">Same Customer Need Engine and Recommendation Engine. Only the product source changes: the final Top 3 is ranked from products found by LLM, web-search and shopping-search providers, not from the catalog. Experiment, not the product.</div>
 
   <div class="card">
     <div class="row">
@@ -59,16 +59,18 @@
   <section id="s3" class="card hidden">
     <h3>3. Final NeedProfile</h3>
     <div id="profile"></div>
-    <div class="row"><button class="primary" id="run">Run LLM product discovery</button><span id="runmsg" class="sub"></span></div>
+    <div class="row"><button class="primary" id="run">Run multi-source product discovery</button><span id="runmsg" class="sub"></span></div>
   </section>
 
   <section id="s4" class="hidden">
-    <h2>Top 3 (existing Recommendation Engine on LLM-sourced products)</h2>
+    <h2>Top 3 (existing Recommendation Engine on discovered products)</h2>
     <div id="top3" class="grid3"></div>
     <h2>Consolidated candidates</h2>
     <div id="cands" class="card scroll"></div>
     <h2>Providers</h2>
     <div id="provs" class="card scroll"></div>
+    <h2>Raw provider outputs</h2>
+    <div id="rawprov"></div>
     <h2>Catalog path, same NeedProfile (comparison only)</h2>
     <div id="catalog" class="card"></div>
     <details class="card"><summary>Raw response</summary><pre id="raw"></pre></details>

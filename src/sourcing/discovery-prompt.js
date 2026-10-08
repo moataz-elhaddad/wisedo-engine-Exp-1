@@ -5,7 +5,7 @@
 // filters with their reasons, money, logistics), so the providers see the same need the Recommendation Engine
 // will score against. Free text the buyer typed is not forwarded: only the structured profile.
 
-export const DISCOVERY_PROMPT_VERSION = 'expb-discovery-1';
+export const DISCOVERY_PROMPT_VERSION = 'expb-discovery-2';
 export const MAX_CANDIDATES_PER_PROVIDER = 8;
 
 const nul = (t) => ({ type: [t, 'null'] });
@@ -25,7 +25,7 @@ const CANDIDATE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   required: ['brand', 'model', 'mpn', 'cpu', 'ram_gb', 'storage_gb', 'gpu', 'display', 'screen_inches', 'os', 'weight_kg', 'battery_hours',
-    'price_egp', 'price_basis', 'availability_egypt', 'grey_import', 'offers', 'fit_reasons', 'confidence', 'evidence'],
+    'price_egp', 'price_basis', 'availability_egypt', 'grey_import', 'offers', 'fit_reasons', 'confidence', 'evidence', 'source_urls'],
   properties: {
     brand: { type: 'string' },
     model: { type: 'string', description: 'Full model name including generation, e.g. "IdeaPad Slim 3 15IAH8"' },
@@ -47,6 +47,7 @@ const CANDIDATE_SCHEMA = {
     fit_reasons: { type: 'array', items: { type: 'string' }, maxItems: 5, description: 'Why it fits THIS buyer need' },
     confidence: { type: 'number', description: '0..1 how sure you are that this exact configuration exists and is sold in Egypt at about this price' },
     evidence: { type: 'string', description: 'Where the facts come from (pages searched, or "from training knowledge")' },
+    source_urls: { type: 'array', items: { type: 'string' }, maxItems: 4, description: 'Pages you actually read that support this candidate (reviews, spec pages, listings). Empty when none.' },
   },
 };
 
@@ -116,6 +117,26 @@ const SYSTEM = [
   '- Answer only with the JSON object requested.',
 ].join('\n');
 
+/** Plain search queries for the web-search and shopping providers, from the same NeedProfile. */
+export function searchQueries(profile, config) {
+  const filters = [...(profile.must || []), ...(profile.prefer || [])];
+  const ram = filters.find((f) => f.attr === 'ram_gb' && (f.op === '>=' || f.op === '=='));
+  const storage = filters.find((f) => f.attr === 'storage_gb' && (f.op === '>=' || f.op === '=='));
+  const os = filters.find((f) => f.attr === 'os' && f.op === 'in');
+  const gpu = filters.find((f) => f.attr === 'has_dedicated_gpu' && f.value === true);
+  const useNeed = (profile.needs || []).find((n) => n.slot === 'use');
+  const useSlot = (config.slots || []).find((x) => x.id === 'use');
+  const uses = useNeed && useSlot ? valueText(useSlot, useNeed.value).toLowerCase() : '';
+  const budget = profile.money && typeof profile.money.budget === 'number' ? profile.money.budget : null;
+  const specs = [ram && `${ram.value}GB RAM`, storage && `${storage.value >= 1024 ? storage.value / 1024 + 'TB' : storage.value + 'GB'} SSD`, gpu && 'RTX',
+    os && Array.isArray(os.value) && os.value.includes('macos') ? 'MacBook' : null].filter(Boolean).join(' ');
+  return {
+    web: `best laptop ${uses ? 'for ' + uses + ' ' : ''}${specs} ${budget ? `under ${budget} EGP ` : ''}price in Egypt`.replace(/\s+/g, ' ').trim(),
+    shopping: `laptop ${specs}`.replace(/\s+/g, ' ').trim(),
+    budget,
+  };
+}
+
 /**
  * The provider-neutral discovery request.
  * @param {any} profile  final NeedProfile
@@ -125,5 +146,5 @@ export function buildDiscoveryRequest(profile, config) {
   const user = `Buyer need (from a structured needs interview):\n${describeNeed(profile, config)}\n\n` +
     `Find up to ${MAX_CANDIDATES_PER_PROVIDER} laptop configurations available in Egypt that fit this need. ` +
     'Return {"candidates": [...]} following the schema.';
-  return { kind: 'discovery', version: DISCOVERY_PROMPT_VERSION, system: SYSTEM, user, schema: DISCOVERY_SCHEMA, maxTokens: 8000 };
+  return { kind: 'discovery', version: DISCOVERY_PROMPT_VERSION, system: SYSTEM, user, schema: DISCOVERY_SCHEMA, maxTokens: 8000, queries: searchQueries(profile, config) };
 }

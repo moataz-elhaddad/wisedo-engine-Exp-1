@@ -22,7 +22,7 @@ async function api(path, body, auth) {
 async function loadStatus() {
   const { data } = await api('/api/expb/status');
   if (!data.ok) { $('status').textContent = 'Status unavailable'; return; }
-  const on = data.providers.map((p) => `<span class="chip ok">${esc(p.name)} · ${esc(p.model)}</span>`).join('');
+  const on = data.providers.map((p) => `<span class="chip ok">${esc(p.name)} (${esc(p.role)}) · ${esc(p.model)}</span>`).join('');
   const off = data.missing.map((p) => `<span class="chip bad" title="missing secret ${esc(p.secret)}">${esc(p.name)}: needs ${esc(p.secret)}</span>`).join('');
   $('status').innerHTML = `Providers: ${on || '<span class="bad">none configured</span>'} ${off}<br>Web search: ${data.web_search ? 'on' : 'off'} · access: ${esc(data.access)}`;
 }
@@ -79,7 +79,7 @@ function showProfile(p) {
   if (p.category !== 'laptop') $('runmsg').innerHTML = '<span class="bad">Experiment B supports laptops only.</span>';
 }
 
-const VSTYLE = { verified: 'ok', partial: 'ok', unavailable: 'warn', mismatch: 'bad', blocked: 'warn', unreachable: 'warn', error: 'warn', no_url: 'warn', not_checked: 'warn' };
+const VSTYLE = { verified: 'ok', listed: 'ok', web_evidence: 'warn', partial: 'ok', unavailable: 'warn', mismatch: 'bad', blocked: 'warn', unreachable: 'warn', error: 'warn', no_url: 'warn', not_checked: 'warn' };
 const vchip = (s) => `<span class="chip ${VSTYLE[s] || ''}">${esc(s || 'n/a')}</span>`;
 
 function showRun(d) {
@@ -95,6 +95,7 @@ function showRun(d) {
       <div class="sub">Engine score ${p.score} (fit ${p.fit}) · ${esc(p.affordability)}</div>
       <div>Providers: ${(ds.providers || []).map((x) => `<span class="chip">${esc(x)}</span>`).join('')} consensus ${ds.provider_consensus_score ?? 'n/a'}</div>
       <div>Verification: ${vchip(ds.verification_status)} evidence ${ds.evidence_confidence ?? 'n/a'}</div>
+      <div class="sub">Evidence from: ${(ds.evidence_providers || []).map((x) => `<span class="chip">${esc(x)}</span>`).join('') || 'none'} ${(ds.evidence_urls || []).slice(0, 3).map((u, i) => `<a href="${esc(u)}" target="_blank" rel="noopener">src${i + 1}</a>`).join(' ')}</div>
       <div class="sub">${esc([ds.raw && ds.raw.cpu, ds.raw && ds.raw.ram_gb && ds.raw.ram_gb + 'GB', ds.raw && ds.raw.storage_gb && ds.raw.storage_gb + 'GB', ds.raw && ds.raw.gpu, ds.raw && ds.raw.display].filter(Boolean).join(' · '))}</div>
       <b>Why the engine ranked it here</b><ul>${reasons}</ul>
       ${(p.notListed || []).length ? `<div class="sub">Not listed (unknown, scored neutral): ${esc(p.notListed.map((x) => en(x.label) || x.id || x).join(', '))}</div>` : ''}</div>`;
@@ -103,13 +104,17 @@ function showRun(d) {
     <td>${esc(c.cpu)}<br>${esc(c.ram_gb)}GB / ${esc(c.storage_gb)}GB<br>${esc(c.gpu)}<br><span class="sub">${esc(c.display)}</span></td>
     <td>${egp(c.price_egp)}${c.price_range && c.price_range[0] !== c.price_range[1] ? `<br><span class="sub">${egp(c.price_range[0])}–${egp(c.price_range[1])}</span>` : ''}</td>
     <td>${c.providers.map((x) => `<span class="chip">${esc(x)}</span>`).join('')}<br>${c.provider_count} (${c.provider_consensus_score})</td>
-    <td>${vchip(c.verification_status)}<br>evidence ${c.evidence_confidence}</td>
+    <td>${vchip(c.verification_status)}<br>evidence ${c.evidence_confidence}<br>${(c.evidence_providers || []).map((x) => `<span class="chip">${esc(x)}</span>`).join('')}${(c.evidence_urls || []).slice(0, 3).map((u, i) => ` <a href="${esc(u)}" target="_blank" rel="noopener">src${i + 1}</a>`).join('')}</td>
     <td>${c.offers.map((o) => `${esc(o.retailer || '?')}${o.url ? ` <a href="${esc(o.url)}" target="_blank" rel="noopener">↗</a>` : ''} ${o.price_egp ? egp(o.page_price_egp || o.price_egp) : ''} ${o.verification ? `<span class="sub">${esc(o.verification)}</span>` : ''}`).join('<br>')}</td>
     <td>${c.product_id ? 'yes' : '<span class="bad">no price</span>'}</td></tr>`).join('');
-  $('cands').innerHTML = `<table><thead><tr><th></th><th>Product</th><th>Specs</th><th>Price</th><th>Suggested by</th><th>Verification</th><th>Offers</th><th>Ranked</th></tr></thead><tbody>${rows}</tbody></table>`;
-  const prow = (d.providers || []).map((p) => `<tr><td>${esc(p.provider)}</td><td>${esc(p.model)}</td><td>${p.ok ? '<span class="ok">ok</span>' : `<span class="bad">${esc(p.error)}</span>`}</td><td>${(p.latency_ms / 1000).toFixed(1)} s</td><td>${p.candidate_count}</td><td>${p.usage ? `${p.usage.input_tokens} in / ${p.usage.output_tokens} out / ${p.usage.web_searches} searches` : 'n/a'}</td><td>${p.cost_usd != null ? '$' + p.cost_usd : 'n/a'}<br><span class="sub">${esc(p.cost_basis)}</span></td><td class="sub">${esc(p.variant || '')}</td></tr>`).join('');
+  $('cands').innerHTML = `<table><thead><tr><th></th><th>Product</th><th>Specs</th><th>Price</th><th>Found by</th><th>Verification / evidence</th><th>Offers</th><th>Ranked</th></tr></thead><tbody>${rows}</tbody></table>`;
+  const prow = (d.providers || []).map((p) => `<tr><td>${esc(p.provider)}<br><span class="sub">${esc(p.role)}</span></td><td>${esc(p.model)}</td><td>${p.ok ? '<span class="ok">ok</span>' : `<span class="bad">${esc(p.error)}</span>`}</td><td>${(p.latency_ms / 1000).toFixed(1)} s</td><td>${p.candidate_count} cand.<br>${p.listing_count || 0} listings</td><td>${p.usage ? (p.role === 'llm' ? `${p.usage.input_tokens} in / ${p.usage.output_tokens} out / ${p.usage.web_searches} searches` : `${p.usage.search_calls} calls / ${p.usage.credits} credits`) : 'n/a'}</td><td>${p.cost_usd != null ? '$' + p.cost_usd : 'n/a'}<br><span class="sub">${esc(p.cost_basis)}</span></td><td class="sub">${esc(p.variant || '')}</td></tr>`).join('');
   const miss = (d.providers_missing || []).map((p) => `<tr><td>${esc(p.name)}</td><td colspan="7" class="bad">not configured: add secret ${esc(p.secret)}</td></tr>`).join('');
-  $('provs').innerHTML = `<table><thead><tr><th>Provider</th><th>Model</th><th>Result</th><th>Latency</th><th>Candidates</th><th>Usage</th><th>Est. cost</th><th>Variant</th></tr></thead><tbody>${prow}${miss}</tbody></table>`;
+  const erow = (d.evidence_runs || []).map((e) => `<tr><td>${esc(e.provider)}<br><span class="sub">evidence</span></td><td></td><td>${e.ok ? '<span class="ok">ok</span>' : `<span class="bad">${esc(e.error)}</span>`}</td><td>${(e.latency_ms / 1000).toFixed(1)} s</td><td>${e.listing_count} listings</td><td>${e.usage ? `${e.usage.search_calls} calls` : ''}</td><td>${e.cost_usd != null ? '$' + e.cost_usd : ''}</td><td class="sub">${esc((e.candidates_searched || []).join(', '))}</td></tr>`).join('');
+  $('rawprov').innerHTML = (d.raw || []).map((r) => `<details class="card"><summary>${esc(r.provider)} (${esc(r.role)}) · ${r.ok ? 'ok' : 'failed'} · ${r.candidates.length} candidates · ${r.listings.length} listings</summary>
+    ${r.listings.length ? `<table><tbody>${r.listings.map((l) => `<tr><td>${esc(l.kind)}</td><td><a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.title)}</a><br><span class="sub">${esc((l.snippet || '').slice(0, 160))}</span></td><td>${esc(l.price_text || '')}</td><td>${esc(l.source || '')}</td></tr>`).join('')}</tbody></table>` : ''}
+    <pre>${esc(JSON.stringify(r.raw_output ?? r.candidates, null, 1).slice(0, 20000))}</pre></details>`).join('');
+  $('provs').innerHTML = `<table><thead><tr><th>Provider</th><th>Model</th><th>Result</th><th>Latency</th><th>Candidates</th><th>Usage</th><th>Est. cost</th><th>Variant</th></tr></thead><tbody>${prow}${erow}${miss}</tbody></table>`;
   const ct = (d.catalog && d.catalog.top3) || [];
   $('catalog').innerHTML = `<div class="sub">${esc(d.catalog && d.catalog.note)}</div>` + (ct.map((p) => `<div>#${p.rank} ${esc(p.product.name.startsWith(p.product.brand) ? p.product.name : p.product.brand + ' ' + p.product.name)} · ${egp(p.price)} · score ${p.score}</div>`).join('') || '<div>No catalog pick.</div>');
 }
@@ -119,7 +124,7 @@ $('tile').addEventListener('click', () => { state = null; step({ type: 'start', 
 $('run').addEventListener('click', async () => {
   if (!profile) return;
   $('run').disabled = true;
-  $('runmsg').textContent = 'Asking the providers (web search can take up to ~90 s)...';
+  $('runmsg').textContent = 'Asking LLM, web-search and shopping providers (can take up to ~90 s)...';
   try {
     const { status, data } = await api('/api/expb/run', { profile }, true);
     if (status === 401 || status === 429 || status === 400 || status === 422) $('runmsg').innerHTML = `<span class="bad">${esc(data.error)}</span>`;

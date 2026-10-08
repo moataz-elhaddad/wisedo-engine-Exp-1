@@ -1,105 +1,112 @@
 name: Deploy Exp-1 to Cloudflare
-# Exp-1 (Experiment B) ONLY: deploys the Worker "wisedo-engine-exp-1" with its own D1 "wisedo-engine-exp-1".
-# A guard step refuses to run if wrangler.jsonc points at the original wisedo-engine-demo Worker or its D1.
-# Optional provider secrets for Experiment B: OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY.
-# Manual only. Runs the tests, applies D1 migrations, builds the pages, deploys the Worker, sets the admin token,
-# loads the sample catalog when the store is empty (or when asked), then checks the live API.
-# Repository secrets: CLOUDFLARE_API_TOKEN (Workers Scripts Edit + D1 Edit), CLOUDFLARE_ACCOUNT_ID,
-# WISEDO_ADMIN_TOKEN (24+ characters; signs in on the SKU page).
-# Optional: GEMINI_API_KEY (free key from Google AI Studio) adds Gemini in front of Workers AI for reading free text.
+# Experiment 1 (Experiment B: multi-source product sourcing) ONLY. A separate Cloudflare project:
+#   staging     Worker wisedo-engine-exp-1-staging  + D1 wisedo-engine-exp-1-staging
+#   production  Worker wisedo-engine-exp-1          + D1 wisedo-engine-exp-1
+# scripts/check-isolation.mjs runs before anything touches Cloudflare and refuses any original Wisedo resource.
+# Promote by running "staging" first, then "production".
+#
+# Repository secrets:
+#   CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID   deploy (token scopes: Workers Scripts Edit, D1 Edit)
+#   WISEDO_ADMIN_TOKEN                            24+ characters; unlocks discovery runs and admin routes
+#   GEMINI_API_KEY, GROQ_API_KEY, MISTRAL_API_KEY, TAVILY_API_KEY, SERPER_API_KEY   discovery providers (each optional)
 on:
   workflow_dispatch:
     inputs:
+      target:
+        description: Where to deploy
+        type: choice
+        options: [staging, production]
+        default: staging
       reset_catalog:
         description: Replace the SKU store with the sample data (edits are lost)
         type: boolean
         default: false
-concurrency: deploy-exp-1
+      live_run:
+        description: Run one real multi-source discovery request after deploying
+        type: boolean
+        default: true
+concurrency: deploy-exp-1-${{ inputs.target }}
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     permissions:
       contents: read
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       WRANGLER_SEND_METRICS: "false"
+      TARGET: ${{ inputs.target }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Isolation guard (Exp-1 resources only)
+        run: node scripts/check-isolation.mjs --env "$TARGET"
+      - name: Resolve target
+        run: |
+          set -eu
+          if [ "$TARGET" = production ]; then
+            echo "WORKER=wisedo-engine-exp-1" >> "$GITHUB_ENV"; echo "DBNAME=wisedo-engine-exp-1" >> "$GITHUB_ENV"; echo "ENVFLAG=" >> "$GITHUB_ENV"
+          else
+            echo "WORKER=wisedo-engine-exp-1-staging" >> "$GITHUB_ENV"; echo "DBNAME=wisedo-engine-exp-1-staging" >> "$GITHUB_ENV"; echo "ENVFLAG=--env staging" >> "$GITHUB_ENV"
+          fi
       - name: Clean and check Cloudflare secrets (values are never printed)
         run: |
           set -eu
           raw=$CLOUDFLARE_API_TOKEN
-          # API tokens only contain letters, digits, _ and -: drop anything else (spaces, newlines, quotes,
-          # invisible characters picked up when copying) and a "Bearer" prefix.
           tok=$(printf '%s' "$raw" | LC_ALL=C tr -cd 'A-Za-z0-9_-'); tok=${tok#Bearer}
           acc=$(printf '%s' "$CLOUDFLARE_ACCOUNT_ID" | LC_ALL=C tr -cd 'a-fA-F0-9' | tr 'A-F' 'a-f')
           if [ -n "$tok" ]; then echo "::add-mask::$tok"; fi
           if [ -n "$acc" ]; then echo "::add-mask::$acc"; fi
           echo "CLOUDFLARE_API_TOKEN=$tok" >> "$GITHUB_ENV"
           echo "CLOUDFLARE_ACCOUNT_ID=$acc" >> "$GITHUB_ENV"
-          echo "token: ${#raw} characters stored, ${#tok} after cleaning; account id: ${#acc} hex characters"
           bad=""
-          [ ${#tok} -ge 40 ] || bad="$bad CLOUDFLARE_API_TOKEN (expected 40+ letters/digits; create one under My Profile > API Tokens, not the Global API Key)"
-          [ ${#acc} -eq 32 ] || bad="$bad CLOUDFLARE_ACCOUNT_ID (expected 32 hex characters)"
-          if [ -n "$bad" ]; then echo "::error::Secret looks wrong:$bad"; exit 1; fi
-      - name: Isolation guard (never the original Worker or D1)
-        run: |
-          set -eu
-          if grep -q '"name": "wisedo-engine-demo"' wrangler.jsonc || grep -q '1855c8d1-7165-4627-90b5-03ccb7d7f2f7' wrangler.jsonc || grep -q '"database_name": "wisedo-engine-demo"' wrangler.jsonc; then
-            echo "::error::wrangler.jsonc points at the original wisedo-engine-demo infrastructure"; exit 1; fi
-          grep -q '"name": "wisedo-engine-exp-1"' wrangler.jsonc
-          grep -q 'f749d540-7fc7-43a2-abbd-abf3e320831e' wrangler.jsonc
-          echo "target: Worker wisedo-engine-exp-1, D1 wisedo-engine-exp-1 (f749d540-...)"
-      - name: Check required secrets exist (values are never printed)
+          [ ${#tok} -ge 40 ] || bad="$bad CLOUDFLARE_API_TOKEN(missing or not an API token)"
+          [ ${#acc} -eq 32 ] || bad="$bad CLOUDFLARE_ACCOUNT_ID(missing or not 32 hex characters)"
+          if [ -n "$bad" ]; then echo "::error::Missing or invalid secrets:$bad"; exit 1; fi
+      - name: Check admin token secret
         env:
           ADMIN: ${{ secrets.WISEDO_ADMIN_TOKEN }}
         run: |
-          set -eu
           ADMIN=$(printf '%s' "$ADMIN" | tr -d '[:space:]')
-          missing=""
-          [ -n "$CLOUDFLARE_API_TOKEN" ] || missing="$missing CLOUDFLARE_API_TOKEN"
-          [ -n "$CLOUDFLARE_ACCOUNT_ID" ] || missing="$missing CLOUDFLARE_ACCOUNT_ID"
-          [ ${#ADMIN} -ge 24 ] || missing="$missing WISEDO_ADMIN_TOKEN(missing or shorter than 24 chars)"
-          if [ -n "$missing" ]; then echo "Missing or invalid secrets:$missing" >&2; exit 1; fi
-      - name: Tests
+          [ ${#ADMIN} -ge 24 ] || { echo "::error::WISEDO_ADMIN_TOKEN missing or shorter than 24 characters"; exit 1; }
+      - name: Tests (all must pass before deploying)
         run: node --test test/
       - name: Build pages
         run: sh web/build.sh dist
       - name: Install wrangler
         run: npm install --no-audit --no-fund
-      - name: Apply D1 migrations (remote)
-        run: npx wrangler d1 migrations apply wisedo-engine-exp-1 --remote
+      - name: Apply D1 migrations (Exp-1 database only)
+        run: |
+          node scripts/check-isolation.mjs --env "$TARGET"
+          npx wrangler d1 migrations apply "$DBNAME" --remote $ENVFLAG
       - name: Deploy Worker and pages
         id: deploy
         run: |
           set -o pipefail
-          npx wrangler deploy 2>&1 | tee deploy.log
+          npx wrangler deploy $ENVFLAG 2>&1 | tee deploy.log
           url=$(grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' deploy.log | head -1)
           [ -n "$url" ] || { echo "No workers.dev URL in deploy output" >&2; exit 1; }
+          case "$url" in "https://$WORKER."*) ;; *) echo "::error::deployed URL $url is not the $WORKER Worker"; exit 1 ;; esac
           echo "url=$url" >> "$GITHUB_OUTPUT"
-      - name: Set Worker secret
+      - name: Set Worker secrets (values are never printed; empty ones are skipped)
         env:
-          ADMIN: ${{ secrets.WISEDO_ADMIN_TOKEN }}
-        run: printf '%s' "$ADMIN" | tr -d '[:space:]' | npx wrangler secret put WISEDO_ADMIN_TOKEN
-      - name: Set Gemini key (optional)
-        env:
-          GEMINI: ${{ secrets.GEMINI_API_KEY }}
+          WISEDO_ADMIN_TOKEN: ${{ secrets.WISEDO_ADMIN_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
         run: |
-          if [ -n "$GEMINI" ]; then printf '%s' "$GEMINI" | tr -d '[:space:]' | npx wrangler secret put GEMINI_API_KEY
-          else echo "No GEMINI_API_KEY secret: free text uses Workers AI, then the keyword rules."; fi
-      - name: Set Experiment B provider keys (optional; values are never printed)
-        env:
-          OPENAI: ${{ secrets.OPENAI_API_KEY }}
-          ANTHROPIC: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: |
-          if [ -n "$OPENAI" ]; then printf '%s' "$OPENAI" | tr -d '[:space:]' | npx wrangler secret put OPENAI_API_KEY; else echo "No OPENAI_API_KEY repository secret: OpenAI discovery is off."; fi
-          if [ -n "$ANTHROPIC" ]; then printf '%s' "$ANTHROPIC" | tr -d '[:space:]' | npx wrangler secret put ANTHROPIC_API_KEY; else echo "No ANTHROPIC_API_KEY repository secret: Anthropic discovery is off."; fi
-      - name: Load sample catalog and verify
+          set -eu
+          for name in WISEDO_ADMIN_TOKEN GEMINI_API_KEY GROQ_API_KEY MISTRAL_API_KEY TAVILY_API_KEY SERPER_API_KEY; do
+            val=$(printenv "$name" | tr -d '[:space:]' || true)
+            if [ -n "$val" ]; then printf '%s' "$val" | npx wrangler secret put "$name" $ENVFLAG >/dev/null && echo "$name: set"
+            else echo "$name: not provided (that provider stays off)"; fi
+          done
+      - name: Smoke checks (engine, catalog, Layer 1)
         env:
           URL: ${{ steps.deploy.outputs.url }}
           ADMIN: ${{ secrets.WISEDO_ADMIN_TOKEN }}
@@ -113,80 +120,39 @@ jobs:
             echo "waiting for $URL ($i/36)"; sleep 10
           done
           cat health.json; echo
-          # The secret can take a few seconds to reach the Worker.
           for i in $(seq 1 12); do
             [ "$(code -H "Authorization: Bearer $ADMIN" "$URL/api/admin/check")" = 200 ] && break
             echo "waiting for the admin token ($i/12)"; sleep 5
           done
-          [ "$(code -H "Authorization: Bearer $ADMIN" "$URL/api/admin/check")" = 200 ] && echo "admin token: 200"
+          [ "$(code -H "Authorization: Bearer $ADMIN" "$URL/api/admin/check")" = 200 ]
           [ "$(code -X POST "$URL/api/admin/reset")" = 401 ] && echo "reset without token: 401"
           n=$(python3 -c 'import json;print(json.load(open("health.json"))["counts"]["products"])')
-          if [ "$RESET" = "true" ] || [ "$n" = "0" ]; then
-            curl -sf -X POST -H "Authorization: Bearer $ADMIN" "$URL/api/admin/reset"; echo
-          fi
-          curl -sf "$URL/api/health"; echo
+          if [ "$RESET" = "true" ] || [ "$n" = "0" ]; then curl -sf -X POST -H "Authorization: Bearer $ADMIN" "$URL/api/admin/reset"; echo; fi
+          python3 -c 'import json,sys;h=json.load(open("health.json"));print("experiment:", h.get("experiment"))'
           [ "$(code "$URL/")" = 200 ] && echo "try-out page: 200"
-          echo "SKU page: $(code -L "$URL/skus.html")"
-          laptops=$(curl -sf "$URL/api/skus?category=laptop" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))')
-          echo "laptop SKUs: $laptops"; [ "$laptops" -gt 0 ]
+          [ "$(code "$URL/expb.html")" = 200 ] && echo "expb page: 200"
           curl -sf -X POST -H 'content-type: application/json' -d '{"event":{"type":"start","tile":"laptop"}}' "$URL/api/session" -o s.json
           python3 -c 'import json;d=json.load(open("s.json"));print("session screen:", d["ui"]["screen"]);assert d["ui"]["screen"]!="error"'
-          # Free text: which reader answered (an LLM, or the keyword rules) and what it filled.
-          # The new version can take a few seconds to reach every edge: retry until the check route answers.
-          for i in $(seq 1 12); do
-            prov=$(curl -s -H "Authorization: Bearer $ADMIN" "$URL/api/admin/llm-check")
-            case "$prov" in *extract*) break ;; esac
-            sleep 5
-          done
-          echo "providers: $(printf '%s' "$prov" | head -c 3000)"
-          echo "parse: $(curl -s -w ' [HTTP %{http_code}, %{time_total}s]' -X POST -H 'content-type: application/json' -d '{"kind":"extract","category":"laptop","text":"عايز لابتوب للبرمجة في حدود 40 ألف كاش"}' "$URL/api/parse" | head -c 1500)"
-          tcode=$(curl -s -o t.json -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{"event":{"type":"start","text":"عايز لابتوب للبرمجة في حدود 40 ألف كاش في القاهرة"}}' "$URL/api/session")
-          echo "free-text session: HTTP $tcode"; [ "$tcode" = 200 ] || { head -c 1500 t.json; echo; exit 1; }
-          python3 -c 'import json;d=json.load(open("t.json"));s=d["state"];print("text reader:", s["texts"][0]["status"], s["texts"][0].get("llm",""));print("filled:", {k:v["value"] for k,v in s["values"].items()});assert s["values"].get("budget")'
-          # Experiment B smoke: page, provider status, then one real discovery run on a fixed laptop need.
-          echo "expb page: $(code "$URL/expb.html")"
-          curl -sf "$URL/api/expb/status" -o expb-status.json; echo "expb status: $(cat expb-status.json)"
-          curl -sf -X POST -H 'content-type: application/json' -d '{"event":{"type":"start","text":"I need a laptop for programming, budget 40000 EGP cash, Cairo"}}' "$URL/api/session" -o s1.json
-          python3 - <<'PY'
-          import json
-          d = json.load(open('s1.json'))
-          json.dump({"state": d["state"], "event": {"type": "showNow"}}, open('s2req.json', 'w'))
-          PY
-          curl -sf -X POST -H 'content-type: application/json' -d @s2req.json "$URL/api/session" -o s2.json
-          python3 -c 'import json;d=json.load(open("s2.json"));assert d["ui"]["screen"]=="result", d["ui"]["screen"];json.dump({"profile":d["ui"]["profile"]},open("run.json","w"));print("profile:", d["ui"]["profile"]["money"], [n["slot"] for n in d["ui"]["profile"]["needs"]])'
-          n=$(python3 -c 'import json;print(len(json.load(open("expb-status.json"))["providers"]))')
-          if [ "$n" -gt 0 ]; then
-            rc=$(curl -s -o expb-run.json -w '%{http_code}' --max-time 240 -X POST -H 'content-type: application/json' -H "Authorization: Bearer $ADMIN" -d @run.json "$URL/api/expb/run")
-            echo "expb run: HTTP $rc"
-            python3 - <<'PY'
-          import json
-          d = json.load(open('expb-run.json'))
-          print("status:", d.get("status"), "error:", d.get("error"))
-          print("metrics:", json.dumps(d.get("metrics")))
-          for p in d.get("providers", []):
-              print("provider:", p["provider"], p["model"], "ok" if p["ok"] else "FAIL", p.get("latency_ms"), "ms", p.get("candidate_count"), "cands", p.get("usage"), "$", p.get("cost_usd"), p.get("error") or "", p.get("variant"))
-          for c in d.get("consolidated", []):
-              print("cand:", c["key"], c["brand"], c["model"], c.get("cpu"), c.get("ram_gb"), c.get("storage_gb"), c.get("gpu"), c.get("price_egp"), c["providers"], c["verification_status"], c["evidence_confidence"])
-          for p in d.get("top3", []):
-              ds = p.get("discovery") or {}
-              print("TOP", p["rank"], p["role"], p["product"]["brand"], p["product"]["name"], p.get("price"), p.get("retailer"), "score", p.get("score"), ds.get("providers"), ds.get("verification_status"))
-          for p in (d.get("catalog") or {}).get("top3", []):
-              print("catalog TOP", p["rank"], p["product"]["name"], p.get("price"), p.get("score"))
-          PY
-          else
-            echo "No discovery provider key set: skipping the live Experiment B run."
-          fi
-          echo "### Deployed: $URL" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Try-out: $URL/" >> "$GITHUB_STEP_SUMMARY"
-          echo "- SKU catalog: $URL/skus.html" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Exp-1 $TARGET: $URL" >> "$GITHUB_STEP_SUMMARY"
           echo "- Experiment B: $URL/expb.html" >> "$GITHUB_STEP_SUMMARY"
-          echo "DEPLOYED_URL=$URL"
-      - name: Upload Experiment B smoke results
+      - name: Live Experiment B run
+        if: inputs.live_run
+        env:
+          EXPB_URL: ${{ steps.deploy.outputs.url }}
+          WISEDO_ADMIN_TOKEN: ${{ secrets.WISEDO_ADMIN_TOKEN }}
+        run: python3 scripts/expb_smoke.py --require-providers 1 | tee expb-summary.txt
+      - name: Isolation guard (after deploy)
+        if: always()
+        run: node scripts/check-isolation.mjs --env "$TARGET"
+      - name: Upload Experiment B results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: expb-smoke
+          name: expb-${{ inputs.target }}
           path: |
             expb-status.json
+            expb-profile.json
             expb-run.json
+            expb-summary.txt
+            deploy.log
           if-no-files-found: ignore

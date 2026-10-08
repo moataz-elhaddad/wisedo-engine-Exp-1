@@ -1,17 +1,25 @@
 // Experiment B pipeline, up to the ephemeral snapshot:
 //
-//   final NeedProfile -> every provider in parallel (independent calls, hard per-provider deadline)
-//     -> normalise each answer (malformed output dropped, never thrown) -> conservative consolidation
-//     -> URL verification -> in-memory CatalogSnapshot
+//   final NeedProfile
+//     phase 1  every provider in parallel, each with a hard deadline:
+//                LLM providers      -> candidate products (structured JSON)
+//                web / shopping     -> listings for the need (pages, shop listings, EGP prices)
+//     normalise LLM answers (malformed output dropped, never thrown); listings with a full configuration and an
+//     EGP price also become candidates; consolidate conservatively
+//     phase 2  evidence search per top candidate (shopping/web providers), listings matched to candidates
+//     page checks (verify.js) -> verification status + evidence confidence
+//     -> in-memory CatalogSnapshot
 //
 // One failed provider never fails the request; zero usable providers returns ok:false with every reason.
-// Observability per provider: latency, ok/error, candidates, tokens, web searches, estimated cost.
 import { buildDiscoveryRequest } from './discovery-prompt.js';
 import { normalizeProviderOutput } from './normalize.js';
 import { consolidate } from './consolidate.js';
 import { verifyCandidates } from './verify.js';
 import { buildEphemeralSnapshot } from './ephemeral-snapshot.js';
 import { estimateCost, DEFAULT_TIMEOUT_MS } from './providers.js';
+import { SEARCH_PRICES } from './search-providers.js';
+import { parseListing, listingCandidate } from './listings.js';
+import { attachEvidence } from './evidence.js';
 
 const withDeadline = (promise, ms, label) => {
   let timer;
@@ -19,15 +27,20 @@ const withDeadline = (promise, ms, label) => {
   return Promise.race([promise, t]).finally(() => clearTimeout(timer));
 };
 
+function costOf(provider, usage) {
+  if (provider.role === 'llm') return estimateCost(provider.model, usage, provider.priceOverride);
+  const p = provider.priceOverride || SEARCH_PRICES[provider.name];
+  if (!p || !usage) return { usd: null, basis: 'no price' };
+  return { usd: Math.round((usage.credits || usage.search_calls || 0) * (p.per_call ?? p.per_search ?? 0) * 10000) / 10000, basis: p.basis };
+}
+
 /**
- * Call one provider and normalise its answer. Never throws.
- * @param {any} provider  adapter from providers.js
- * @param {any} request   buildDiscoveryRequest output
- * @param {number} deadlineMs
- * @param {() => number} clock
+ * Call one provider (phase 1) and normalise its answer. Never throws.
+ * LLM providers yield candidates; web/shopping providers yield listings (and candidates for full listings).
  */
 export async function runProvider(provider, request, deadlineMs, clock = Date.now) {
   const t0 = clock();
+  const nowIso = new Date(t0).toISOString();
   let res;
   try {
     res = await withDeadline(Promise.resolve().then(() => provider.discover(request)), deadlineMs, provider.name);
@@ -36,17 +49,36 @@ export async function runProvider(provider, request, deadlineMs, clock = Date.no
   }
   const latency_ms = clock() - t0;
   const usage = res && res.usage ? res.usage : null;
-  const cost = estimateCost(provider.model, usage, provider.priceOverride);
-  const base = { provider: provider.name, model: (res && res.model) || provider.model, latency_ms, usage, cost_usd: cost.usd, cost_basis: cost.basis, variant: res && res.variant, attempts: (res && res.attempts) || [] };
-  if (!res || !res.ok) return { ...base, ok: false, error: (res && res.error) || 'no result', candidates: [], rejected: [] };
-  const norm = normalizeProviderOutput(res.output, provider.name);
-  if (norm.error) return { ...base, ok: false, error: `${provider.name}: ${norm.error}`, candidates: [], rejected: norm.rejected };
-  return { ...base, ok: norm.candidates.length > 0, ...(norm.candidates.length ? {} : { error: `${provider.name}: no valid candidates` }), candidates: norm.candidates, rejected: norm.rejected };
+  const cost = costOf(provider, usage);
+  const base = { provider: provider.name, role: provider.role || 'llm', model: (res && res.model) || provider.model, latency_ms, usage, cost_usd: cost.usd, cost_basis: cost.basis, variant: res && res.variant, attempts: (res && res.attempts) || [], ...(res && res.warnings ? { warnings: res.warnings } : {}) };
+  if (!res || !res.ok) return { ...base, ok: false, error: (res && res.error) || 'no result', candidates: [], listings: [], rejected: [] };
+  if (Array.isArray(res.listings)) {
+    const listings = res.listings.filter((l) => l && l.url);
+    const candidates = listings.map((l) => listingCandidate(parseListing(l), nowIso)).filter(Boolean);
+    return { ...base, ok: listings.length > 0, ...(listings.length ? {} : { error: `${provider.name}: no results` }), candidates, listings, rejected: [] };
+  }
+  const norm = normalizeProviderOutput(res.output, provider.name, nowIso);
+  if (norm.error) return { ...base, ok: false, error: `${provider.name}: ${norm.error}`, candidates: [], listings: [], rejected: norm.rejected };
+  return { ...base, ok: norm.candidates.length > 0, ...(norm.candidates.length ? {} : { error: `${provider.name}: no valid candidates` }), candidates: norm.candidates, listings: [], rejected: norm.rejected, raw_output: res.output };
+}
+
+/** Phase 2: evidence searches for the top candidates, on every provider that offers evidence(). */
+async function runEvidence(providers, products, opts, deadlineMs, clock) {
+  const top = products.filter((p) => p.signature).slice(0, opts.maxCandidates ?? 5);
+  if (!top.length) return [];
+  return Promise.all(providers.filter((p) => typeof p.evidence === 'function' && (opts.providers || ['serper']).includes(p.name)).map(async (p) => {
+    const t0 = clock();
+    let res;
+    try { res = await withDeadline(p.evidence(top), deadlineMs, `${p.name} evidence`); } catch (e) { res = { ok: false, error: String((e && e.message) || e).slice(0, 200) }; }
+    const cost = costOf(p, res && res.usage);
+    return { provider: p.name, phase: 'evidence', ok: !!(res && res.ok), error: res && res.ok ? null : (res && res.error) || 'failed', latency_ms: clock() - t0, usage: (res && res.usage) || null, cost_usd: cost.usd, listings: (res && res.listings) || [], candidates_searched: top.map((c) => c.key) };
+  }));
 }
 
 /**
  * @param {{profile: any, config: any, configs: Record<string, any>, now: any, providers: any[], missing?: any[],
  *          fetch?: typeof fetch, verify?: {enabled?: boolean, maxUrls?: number, timeoutMs?: number},
+ *          evidence?: {enabled?: boolean, maxCandidates?: number, providers?: string[]},
  *          deadlineMs?: number, requestId?: string, clock?: () => number}} args
  */
 export async function discoverProducts(args) {
@@ -59,15 +91,22 @@ export async function discoverProducts(args) {
   const tDiscovery = clock();
   const allCandidates = okRuns.flatMap((r) => r.candidates);
   const products = consolidate(allCandidates, okRuns.map((r) => r.provider));
+  const evidenceRuns = args.evidence && args.evidence.enabled === false ? [] : await runEvidence(args.providers, products, args.evidence || {}, Math.min(deadline, 30_000), clock);
+  const listings = [...okRuns.flatMap((r) => r.listings), ...evidenceRuns.flatMap((r) => r.listings)];
+  attachEvidence(products, listings);
+  const tEvidence = clock();
   const verification = await verifyCandidates(products, { fetch: args.fetch, ...(args.verify || {}) });
   const built = buildEphemeralSnapshot(products, { configs: args.configs, category: args.config.id, now: args.now, requestId: args.requestId });
-  const total_cost = runs.reduce((s, r) => s + (typeof r.cost_usd === 'number' ? r.cost_usd : 0), 0);
+  const costs = [...runs, ...evidenceRuns].map((r) => (typeof r.cost_usd === 'number' ? r.cost_usd : 0));
+  const total_cost = costs.reduce((a, b) => a + b, 0);
   return {
     ok: okRuns.length > 0,
-    error: okRuns.length ? null : 'no provider returned usable candidates',
-    request: { version: request.version, need: request.user },
-    providers: runs.map(({ candidates, ...r }) => ({ ...r, candidate_count: candidates.length })),
+    error: okRuns.length ? null : 'no provider returned usable results',
+    request: { version: request.version, need: request.user, queries: request.queries },
+    providers: runs.map(({ candidates, listings: ls, raw_output, ...r }) => ({ ...r, candidate_count: candidates.length, listing_count: ls.length })),
+    evidence_runs: evidenceRuns.map(({ listings: ls, ...r }) => ({ ...r, listing_count: ls.length })),
     providers_missing: args.missing || [],
+    raw: runs.map((r) => ({ provider: r.provider, role: r.role, ok: r.ok, candidates: r.candidates, listings: r.listings.slice(0, 25), raw_output: r.raw_output ?? null })),
     raw_candidates: allCandidates,
     consolidated: products,
     snapshot: built.snapshot,
@@ -77,10 +116,13 @@ export async function discoverProducts(args) {
       providers_called: runs.length,
       providers_ok: okRuns.length,
       raw_candidates: allCandidates.length,
+      listings: listings.length,
       consolidated: products.length,
       rankable: built.snapshot.products.length,
       urls_checked: verification.checked,
+      evidence_searches: evidenceRuns.reduce((s, r) => s + ((r.usage && r.usage.search_calls) || 0), 0),
       discovery_ms: tDiscovery - t0,
+      evidence_ms: tEvidence - tDiscovery,
       verification_ms: verification.ms,
       estimated_cost_usd: Math.round(total_cost * 10000) / 10000,
     },

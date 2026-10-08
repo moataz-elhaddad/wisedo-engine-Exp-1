@@ -14,6 +14,23 @@ const USER_AGENT = 'Mozilla/5.0 (compatible; WisedoExp1-LinkCheck/0.1; product-a
 
 const RANK = { verified: 6, partial: 5, unavailable: 4, mismatch: 3, blocked: 2, unreachable: 1, error: 1, not_checked: 0, no_url: 0 };
 
+/**
+ * Candidate-level status from the page checks plus search/shopping listings (evidence.js):
+ *   verified      a product page was fetched and names the product with matching specs
+ *   listed        an Egyptian listing with an EGP price matches the model and specs (or the MPN)
+ *   partial / unavailable / mismatch   from the page checks
+ *   web_evidence  pages were found that name the product, but nothing priced in Egypt and no page check passed
+ *   blocked / unreachable / no_url / not_checked   nothing could be checked
+ */
+export function finalStatus(p, pageStatus) {
+  if (pageStatus === 'verified') return 'verified';
+  const strong = (p.listing_evidence || []).filter((e) => e.egypt && e.currency === 'EGP' && e.price && e.strength !== 'model');
+  if (strong.length && pageStatus !== 'unavailable') return 'listed';
+  if (['partial', 'unavailable', 'mismatch'].includes(pageStatus)) return pageStatus;
+  if ((p.listing_evidence || []).length) return 'web_evidence';
+  return pageStatus;
+}
+
 const CHALLENGE = /captcha|cf-chl|challenge-platform|access denied|are you a robot|verify you are human|bot detection|px-captcha|datadome/i;
 const OUT_OF_STOCK = /out of stock|currently unavailable|sold out|غير متوفر|غير متاح حاليا|نفدت الكمية|نفذت الكمية|"availability"\s*:\s*"(?:https?:\/\/schema\.org\/)?(?:OutOfStock|Discontinued|SoldOut)"/i;
 
@@ -123,11 +140,11 @@ export async function verifyUrl(url, cand, opts = {}) {
 
 /**
  * Evidence confidence 0..1 from verification only (kept apart from provider consensus):
- *   verified 0.9 (+0.05 with a structured page price), partial 0.6, unavailable 0.5, mismatch 0.15,
+ *   verified 0.9 (+0.05 with a structured page price), listed 0.8, partial 0.6, unavailable 0.5, web_evidence 0.45, mismatch 0.15,
  *   not verifiable (blocked, unreachable, no URL, not checked) 0.3.
  */
 export function evidenceConfidence(status, hasPagePrice) {
-  const base = { verified: 0.9, partial: 0.6, unavailable: 0.5, mismatch: 0.15 }[status] ?? 0.3;
+  const base = { verified: 0.9, listed: 0.8, partial: 0.6, unavailable: 0.5, web_evidence: 0.45, mismatch: 0.15 }[status] ?? 0.3;
   return Math.min(1, base + (status === 'verified' && hasPagePrice ? 0.05 : 0));
 }
 
@@ -144,7 +161,7 @@ export async function verifyCandidates(products, opts = {}) {
     p.verification = { status: p.offers.some((o) => o.url) ? 'not_checked' : 'no_url', urls: [] };
     if (opts.enabled === false) continue;
     for (const o of p.offers) {
-      if (!o.url || jobs.length >= maxUrls) continue;
+      if (!o.url || jobs.length >= maxUrls || /google\.[a-z.]+\//.test(o.url)) continue;
       jobs.push({ p, o });
     }
   }
@@ -162,7 +179,9 @@ export async function verifyCandidates(products, opts = {}) {
     if (r.status === 'mismatch') { o.rejected_url = o.url; o.url = null; }
   }
   for (const p of products) {
-    const best = p.verification.urls.reduce((acc, u) => (RANK[u.status] > RANK[acc] ? u.status : acc), p.verification.status);
+    const pageBest = p.verification.urls.reduce((acc, u) => (RANK[u.status] > RANK[acc] ? u.status : acc), p.verification.status);
+    const best = finalStatus(p, pageBest);
+    p.verification.page_status = pageBest;
     p.verification.status = best;
     p.verification_status = best;
     p.evidence_confidence = Math.round(100 * evidenceConfidence(best, p.offers.some((o) => o.page_price_egp))) / 100;

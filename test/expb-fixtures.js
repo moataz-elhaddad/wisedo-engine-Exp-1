@@ -52,6 +52,25 @@ export const geminiResponse = (candidates, extra = {}) => ({
   usageMetadata: { promptTokenCount: 5000, candidatesTokenCount: 2000 }, ...extra,
 });
 
+export const chatResponse = (candidates, extra = {}, msgExtra = {}) => ({
+  id: 'chat_test', model: 'm', choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: JSON.stringify({ candidates }), ...msgExtra } }],
+  usage: { prompt_tokens: 4000, completion_tokens: 1500 }, ...extra,
+});
+export const mistralResponse = (c, e) => chatResponse(c, { model: 'mistral-medium-latest', ...e });
+export const groqResponse = (c, e) => chatResponse(c, { model: 'groq/compound', ...e }, { executed_tools: [{ type: 'search', arguments: '{"query":"laptop egypt"}' }, { type: 'search' }] });
+
+/** Shop listing titles as they look on Egyptian retailers. */
+export const LISTINGS = {
+  ideapad: { title: 'Lenovo IdeaPad Slim 3 15IAH8 Laptop - Intel Core i5-12450H, 16GB RAM, 512GB SSD, Intel UHD Graphics, 15.6" FHD IPS', source: 'Amazon.eg', link: 'https://www.amazon.eg/dp/IDEAPAD3', price: 'EGP 32,499.00' },
+  ideapad8: { title: 'Lenovo IdeaPad Slim 3 15IAH8 - Core i5-12450H - 8GB RAM - 512GB SSD', source: 'B.TECH', link: 'https://btech.com/en/ideapad-8gb', price: 'EGP 28,999.00' },
+  vivobook: { title: 'ASUS Vivobook 16 X1605VA, Intel Core i7-13620H, 16GB RAM, 1TB SSD, Intel UHD Graphics, 16" WUXGA', source: '2B', link: 'https://2b.com.eg/en/vivobook-16-x1605va', price: 'EGP 38,750.00' },
+  mouse: { title: 'Logitech M185 Wireless Mouse', source: 'Noon', link: 'https://www.noon.com/egypt-en/m185/p/', price: 'EGP 450.00' },
+  usd: { title: 'HP Victus 15-fa1xxx Intel Core i5-13420H 16GB 512GB RTX 3050', source: 'BestBuy', link: 'https://www.bestbuy.com/victus', price: '$649.99' },
+};
+export const serperShopping = (items) => ({ shopping: items.map((x, i) => ({ ...x, position: i + 1 })), credits: 1 });
+export const serperSearch = (items) => ({ organic: items.map((x, i) => ({ title: x.title, link: x.link, snippet: `${x.title} price ${x.price}`, position: i + 1 })), credits: 1 });
+export const tavilyResponse = (results) => ({ query: 'q', results: results.map((r) => ({ title: r.title, url: r.link || r.url, content: r.content || `${r.title} – available in Egypt for ${r.price || 'n/a'}`, score: 0.8 })), response_time: 1.2 });
+
 const jsonRes = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 const page = (html, status = 200) => new Response(html, { status, headers: { 'content-type': 'text/html' } });
 
@@ -64,7 +83,9 @@ export function fakeFetch(routes = {}, pages = {}) {
   const f = async (url, init = {}) => {
     const u = String(url);
     calls.push({ url: u, body: init.body ? JSON.parse(init.body) : null, headers: init.headers });
-    const which = u.includes('api.openai.com') ? 'openai' : u.includes('api.anthropic.com') ? 'anthropic' : u.includes('generativelanguage') ? 'gemini' : null;
+    const which = u.includes('api.openai.com') ? 'openai' : u.includes('api.anthropic.com') ? 'anthropic' : u.includes('generativelanguage') ? 'gemini'
+      : u.includes('api.mistral.ai') ? 'mistral' : u.includes('api.groq.com') ? 'groq' : u.includes('api.tavily.com') ? 'tavily'
+      : u.includes('google.serper.dev/shopping') ? 'serper_shopping' : u.includes('google.serper.dev/search') ? 'serper_search' : null;
     if (which) {
       const r = routes[which];
       if (r === undefined) return jsonRes(500, { error: { message: 'no route' } });

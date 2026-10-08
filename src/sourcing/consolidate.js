@@ -12,7 +12,7 @@
 
 export const MODEL_SIMILARITY = 0.6;
 
-const lc = (s) => String(s ?? '').toLowerCase();
+const lc = (s) => String(s ?? '').toLowerCase().replace(/جيجا(?:بايت)?/g, 'gb').replace(/تيرا(?:بايت)?/g, 'tb');
 
 /** Specific CPU token: "i5-12450h", "ultra7-155h", "ryzen7-7735hs", "m3pro", "snapdragonx-elite"; null when vague. */
 export function cpuToken(cpu) {
@@ -62,6 +62,13 @@ function jaccard(a, b) {
   return inter / (a.size + b.size - inter);
 }
 
+function containment(small, big) {
+  if (!small.size) return 0;
+  let inter = 0;
+  for (const t of small) if (big.has(t)) inter++;
+  return inter / small.size;
+}
+
 const normMpn = (m) => (m ? lc(m).replace(/[^a-z0-9]/g, '') : null);
 
 /** Configuration signature, or null when any part is unknown (then the candidate is never merged). */
@@ -84,8 +91,14 @@ export function sameProduct(a, b) {
   if (!sa || !sb) return { same: false, why: 'configuration incomplete' };
   if (sa !== sb) return { same: false, why: 'configuration differs' };
   if (ma && mb && ma === mb) return { same: true, why: 'same MPN and configuration' };
-  const sim = jaccard(modelTokens(a.model, a.brand), modelTokens(b.model, b.brand));
+  const ta = modelTokens(a.model, a.brand), tb = modelTokens(b.model, b.brand);
+  const sim = jaccard(ta, tb);
   if (sim >= MODEL_SIMILARITY) return { same: true, why: `same configuration, model names agree (${sim.toFixed(2)})` };
+  // A shop title usually carries extra words ("15IAH8 Arctic Grey"): the shorter name contained in the longer one
+  // counts too, when that shorter name has at least 3 tokens (so "IdeaPad 3" alone never matches everything).
+  const [small, big] = ta.size <= tb.size ? [ta, tb] : [tb, ta];
+  const cont = containment(small, big);
+  if (small.size >= 3 && cont >= 0.9) return { same: true, why: `same configuration, model name contained (${cont.toFixed(2)})` };
   return { same: false, why: `model names differ (${sim.toFixed(2)})` };
 }
 
@@ -148,7 +161,7 @@ export function consolidate(candidates, providersAsked) {
       weight_kg: median(m.map((x) => x.weight_kg)),
       battery_hours: median(m.map((x) => x.battery_hours)),
       warranty_months: median(m.map((x) => x.warranty_months)),
-      price_egp: median(prices),
+      price_egp: prices.length ? Math.round(median(prices)) : null,
       price_range: prices.length ? [Math.min(...prices), Math.max(...prices)] : null,
       grey_import: m.some((x) => x.grey_import === true) ? true : m.some((x) => x.grey_import === false) ? false : null,
       availability: mode(m.map((x) => x.availability)) || 'unknown',
@@ -156,6 +169,8 @@ export function consolidate(candidates, providersAsked) {
       fit_reasons: m.flatMap((x) => x.fit_reasons.map((r) => ({ provider: x.provider, text: r }))).slice(0, 8),
       provider_confidence: Object.fromEntries(m.map((x) => [x.provider, x.confidence])),
       evidence: m.map((x) => ({ provider: x.provider, text: x.evidence, price_basis: x.price_basis })),
+      evidence_urls: [...new Set(m.flatMap((x) => [...(x.evidence_urls || []), ...x.offers.map((o) => o.url)]).filter(Boolean))],
+      found_at: m.map((x) => x.timestamp).filter(Boolean)[0] || null,
       signature: signature(first),
       // Consensus: kept apart from fit, price and evidence. It is metadata, never a score input.
       providers,

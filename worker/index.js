@@ -208,7 +208,7 @@ async function route(request, env, url) {
   const [a, b] = parts.map(decodeURIComponent);
 
   if (m === 'GET' && a === 'health') {
-    return json({ ok: true, tenant, engine: ENGINE_VERSION, clock: env.CLOCK === 'real' ? 'real' : 'demo', data_now: await store.dataNow(env, tenant), llm: llmProviders(env).map((p) => p.name), text_rules: true, writes: String(env.WISEDO_ADMIN_TOKEN || '').trim().length >= 24, counts: await store.counts(env, tenant) });
+    return json({ ok: true, experiment: env.EXPERIMENT || null, tenant, engine: ENGINE_VERSION, clock: env.CLOCK === 'real' ? 'real' : 'demo', data_now: await store.dataNow(env, tenant), llm: llmProviders(env).map((p) => p.name), text_rules: true, writes: String(env.WISEDO_ADMIN_TOKEN || '').trim().length >= 24, counts: await store.counts(env, tenant) });
   }
   if (m === 'GET' && a === 'categories') return json(categories());
   if (m === 'GET' && a === 'snapshot') {

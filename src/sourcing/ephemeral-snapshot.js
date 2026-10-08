@@ -78,7 +78,7 @@ export function buildEphemeralSnapshot(products, ctx) {
     const listing = p.offers.length ? p.offers : [{ retailer: null, url: null, price_egp: p.price_egp, provider: p.providers[0] }];
     const made = [];
     for (const o of listing) {
-      const price = o.page_price_egp ?? o.price_egp ?? (listing.length === 1 ? p.price_egp : null);
+      const price = o.page_price_egp ?? o.listing_price_egp ?? o.price_egp ?? (listing.length === 1 ? p.price_egp : null);
       if (!(typeof price === 'number' && price > 0)) continue;
       const r = resolveRetailer(o);
       if (!retailers.has(r.id)) retailers.set(r.id, { id: r.id, tenant_id: EPHEMERAL_TENANT, name: r.name, trust: r.trust, return_days: r.return_days, cod: r.cod, base_url: r.base_url, affiliate_tag: null, source: 'crawl', known: r.known });
@@ -93,7 +93,8 @@ export function buildEphemeralSnapshot(products, ctx) {
         extras: [], checked_at: nowIso, source: 'crawl',
         // Experiment metadata (ignored by Layer 2):
         url_kind: o.url ? 'product_page' : 'search_link',
-        price_source: o.price_source || (o.price_egp ? 'provider_offer' : 'provider_estimate'),
+        price_source: o.price_source || (o.source === 'listing' ? 'listing' : o.price_egp ? 'provider_offer' : 'provider_estimate'),
+        found_by: o.provider || null,
         verification: o.verification || (o.url ? 'not_checked' : 'no_url'),
         ...(o.rejected_url ? { rejected_url: o.rejected_url } : {}),
         assumptions: ['delivery', ...(r.known ? [] : ['retailer_terms'])],
@@ -109,7 +110,8 @@ export function buildEphemeralSnapshot(products, ctx) {
       attr_mapping: mapping,
       providers: p.providers, provider_count: p.provider_count, provider_consensus_score: p.provider_consensus_score,
       verification_status: p.verification_status, evidence_confidence: p.evidence_confidence,
-      price_range: p.price_range, fit_reasons: p.fit_reasons, merged_because: p.merged_because, possible_duplicates: p.possible_duplicates,
+      price_range: p.price_range, fit_reasons: p.fit_reasons,
+      evidence_urls: (p.evidence_urls || []).slice(0, 12), evidence_providers: p.evidence_providers || [], listing_evidence: (p.listing_evidence || []).slice(0, 10), merged_because: p.merged_because, possible_duplicates: p.possible_duplicates,
     };
   }
   const snapshot = {

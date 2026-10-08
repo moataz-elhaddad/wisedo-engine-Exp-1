@@ -52,7 +52,8 @@ export async function expbRoute(env, request, h, b) {
     const { available, missing } = providersFromEnv(env);
     return h.json({
       ok: true, experiment: 'B', categories: EXPB_CATEGORIES,
-      providers: available.map((p) => ({ name: p.name, model: p.model })), missing,
+      providers: available.map((p) => ({ name: p.name, role: p.role, model: p.model })), missing,
+      experiment: env.EXPERIMENT || null,
       web_search: String(env.DISCOVERY_WEB_SEARCH || '1') !== '0',
       access: String(env.EXPB_PUBLIC || '') === '1' ? 'public' : 'admin_token',
     });
@@ -86,6 +87,7 @@ async function runHandler(env, request, h) {
   const llmSource = new LLMProductDiscoverySource({
     providers: available, missing, configs: CONFIGS, requestId,
     verify: { enabled: String(env.DISCOVERY_VERIFY || '1') !== '0', maxUrls: Number(env.DISCOVERY_VERIFY_MAX_URLS) || 12, timeoutMs: Number(env.DISCOVERY_VERIFY_TIMEOUT_MS) || 5000 },
+    evidence: { enabled: String(env.DISCOVERY_EVIDENCE || '1') !== '0', maxCandidates: Number(env.DISCOVERY_EVIDENCE_MAX) || 5, providers: String(env.DISCOVERY_EVIDENCE_PROVIDERS || 'serper').split(',').map((x) => x.trim()) },
   });
   const [llm, cat] = await Promise.all([
     recommendWith(llmSource, profile, now),
@@ -105,11 +107,14 @@ async function runHandler(env, request, h) {
     need: meta.request.need,
     providers: meta.providers,
     providers_missing: missing,
+    evidence_runs: meta.evidence_runs,
+    raw: meta.raw,
+    queries: meta.request.queries,
     consolidated: meta.consolidated.map((c) => ({
       key: c.key, brand: c.brand, model: c.model, mpn: c.mpn, cpu: c.cpu, ram_gb: c.ram_gb, storage_gb: c.storage_gb, gpu: c.gpu, display: c.display,
       price_egp: c.price_egp, price_range: c.price_range, providers: c.providers, provider_count: c.provider_count, provider_consensus_score: c.provider_consensus_score,
       verification_status: c.verification_status, evidence_confidence: c.evidence_confidence, verification: c.verification,
-      offers: c.offers, possible_duplicates: c.possible_duplicates, merged_because: c.merged_because, fit_reasons: c.fit_reasons,
+      offers: c.offers, evidence_urls: c.evidence_urls, evidence_providers: c.evidence_providers, listing_evidence: c.listing_evidence, found_at: c.found_at, possible_duplicates: c.possible_duplicates, merged_because: c.merged_because, fit_reasons: c.fit_reasons,
       product_id: Object.keys(meta.index).find((id) => meta.index[id].key === c.key) || null,
     })),
     unrankable: meta.unrankable,

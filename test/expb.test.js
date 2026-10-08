@@ -120,7 +120,7 @@ test('refusal and truncation are failures, not candidates', async () => {
 test('providersFromEnv lists missing secrets and never the key values', () => {
   const { available, missing } = providersFromEnv({ ANTHROPIC_API_KEY: ' sk-ant ', DISCOVERY_PROVIDERS: 'openai,anthropic,gemini' });
   assert.deepEqual(available.map((p) => p.name), ['anthropic']);
-  assert.deepEqual(missing, [{ name: 'openai', secret: 'OPENAI_API_KEY' }, { name: 'gemini', secret: 'GEMINI_API_KEY' }]);
+  assert.deepEqual(missing, [{ name: 'openai', role: 'llm', secret: 'OPENAI_API_KEY' }, { name: 'gemini', role: 'llm', secret: 'GEMINI_API_KEY' }]);
   assert.ok(!JSON.stringify(missing).includes('sk-ant'));
 });
 
@@ -409,15 +409,15 @@ async function workerSetup(extraEnv = {}) {
 }
 
 test('worker: /api/expb/status reports configured providers and missing secrets', async () => {
-  const { call } = await workerSetup({ GEMINI_API_KEY: 'g' });
+  const { call } = await workerSetup({ GEMINI_API_KEY: 'g', SERPER_API_KEY: 's' });
   const r = await call('GET', '/api/expb/status', null, false);
-  assert.deepEqual(r.body.providers.map((p) => p.name), ['gemini']);
-  assert.deepEqual(r.body.missing.map((m) => m.secret), ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY']);
+  assert.deepEqual(r.body.providers.map((p) => [p.name, p.role]), [['gemini', 'llm'], ['serper', 'shopping']]);
+  assert.deepEqual(r.body.missing.map((m) => m.secret), ['GROQ_API_KEY', 'MISTRAL_API_KEY', 'TAVILY_API_KEY']);
   assert.equal(r.body.access, 'admin_token');
 });
 
 test('worker: /api/expb/run needs the token, validates the profile, runs end to end and logs the run', async () => {
-  const { env, call } = await workerSetup({ OPENAI_API_KEY: 'sk-openai-SECRET', ANTHROPIC_API_KEY: 'sk-ant-SECRET', GEMINI_API_KEY: 'gemini-SECRET', EXPB_RATE_PER_MIN: '100' });
+  const { env, call } = await workerSetup({ DISCOVERY_PROVIDERS: 'openai,anthropic,gemini', OPENAI_API_KEY: 'sk-openai-SECRET', ANTHROPIC_API_KEY: 'sk-ant-SECRET', GEMINI_API_KEY: 'gemini-SECRET', EXPB_RATE_PER_MIN: '100' });
   assert.equal((await call('POST', '/api/expb/run', { profile: F.PROFILE }, false)).status, 401);
   assert.equal((await call('POST', '/api/expb/run', { profile: { ...F.PROFILE, category: 'tv' } })).status, 400);
   assert.equal((await call('POST', '/api/expb/run', { profile: { ...F.PROFILE, needs: 'x' } })).status, 422);
@@ -451,6 +451,6 @@ test('worker: zero providers configured returns 502 with the missing secrets, no
   const r = await call('POST', '/api/expb/run', { profile: F.PROFILE });
   assert.equal(r.status, 502);
   assert.equal(r.body.ok, false);
-  assert.deepEqual(r.body.providers_missing.map((m) => m.secret), ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GEMINI_API_KEY']);
+  assert.deepEqual(r.body.providers_missing.map((m) => m.secret), ['GEMINI_API_KEY', 'GROQ_API_KEY', 'MISTRAL_API_KEY', 'TAVILY_API_KEY', 'SERPER_API_KEY']);
   assert.equal(r.body.top3.length, 0);
 });

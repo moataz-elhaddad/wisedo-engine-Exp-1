@@ -10,4 +10,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Isolation guard
+        run: node scripts/check-isolation.mjs && node scripts/check-isolation.mjs --env staging
       - run: node --test test/

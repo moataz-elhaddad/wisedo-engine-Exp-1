@@ -1,32 +1,32 @@
-# Experiment B: multi-LLM product sourcing (Exp-1 only)
+# Experiment B: multi-source product sourcing (Exp-1 only)
 
 Same Customer Need Engine (Layer 1) and Recommendation Engine (Layer 2, `match()`), unchanged. Only the product
 source of the FINAL recommendation changes.
 
 ```
-Layer 1 session (unchanged, still simulates on the D1 catalog while asking) -> final NeedProfile
-  -> ProductSource
-       ExistingCatalogProductSource  (D1 catalog snapshot, as before)
-       LLMProductDiscoverySource     (OpenAI + Anthropic + Gemini in parallel, web search on)
-          -> normalise (malformed output dropped) -> conservative consolidation -> URL verification
-          -> in-memory CatalogSnapshot (tenant expb-ephemeral, never stored)
-  -> match(profile, snapshot, now, 'rank')  (unchanged)  -> Top 3
+Layer 1 session (unchanged) -> final NeedProfile
+  -> LLMProductDiscoverySource (ProductSource)
+       phase 1, in parallel, each with a hard deadline:
+         gemini   llm         Gemini + Google Search grounding, structured JSON
+         groq     llm         Groq Compound (open models + built-in web search)
+         mistral  llm         Mistral, knowledge only (a different model family)
+         tavily   web_search  pages about the need (Egypt boost)
+         serper   shopping    Google Shopping (gl=eg) + Google results on Egyptian retailers
+       normalise -> listings with full config + EGP price become candidates -> conservative consolidation
+       phase 2: evidence search per top candidate (serper) -> listings matched to candidates (evidence, offers)
+       page checks (one plain GET, never bypassing protection) -> verification status, evidence confidence
+       -> in-memory CatalogSnapshot (tenant expb-ephemeral, never stored)
+  -> match(profile, snapshot, now, 'rank')  (unchanged) -> Top 3
 ```
 
-| File | Role |
-|---|---|
-| `src/sourcing/product-source.js` | `ProductSource` classes, `recommendWith()` |
-| `src/sourcing/discovery-prompt.js` | provider request built from the NeedProfile; JSON schema |
-| `src/sourcing/providers.js` | OpenAI / Anthropic / Gemini adapters, usage, cost estimate |
-| `src/sourcing/normalize.js` | untrusted output -> candidates |
-| `src/sourcing/consolidate.js` | entity resolution (brand + MPN + CPU/RAM/storage/GPU signature + model-name similarity) |
-| `src/sourcing/verify.js` | one plain GET per URL; blocked pages are never bypassed |
-| `src/sourcing/specs.js` | raw specs -> laptop attribute scale (editorial rules; build/keyboard left unknown) |
-| `src/sourcing/ephemeral-snapshot.js` | candidates -> CatalogSnapshot, with flagged assumptions |
-| `worker/expb.js` | `/api/expb/status`, `/api/expb/run`, `/api/expb/runs` |
-| `web/expb.html` | experiment UI |
+Kept apart: customer fit and price fit (the engine), provider consensus (who FOUND it), evidence (which pages and
+listings SUPPORT it), verification status. Consensus is metadata only.
 
-Kept apart, never mixed: customer fit and price fit (the engine), provider consensus (metadata), evidence
-confidence and verification status (metadata). Assumptions on LLM offers: delivery everywhere, fee 0, 3 days;
-no installment plans; no reference price (no deal bonus, no resale value); unknown shops trust 6, no COD.
-Run logs (metrics + Top 3 only) go to the Exp-1 D1 table `expb_runs`. Laptops only.
+Verification statuses: verified (page names it, specs agree) > listed (Egyptian EGP listing matches model + specs or
+MPN) > partial > unavailable > web_evidence > mismatch; blocked / unreachable / no_url / not_checked when nothing
+could be checked.
+
+Infrastructure (separate Cloudflare project, see wrangler.jsonc): production Worker/D1 `wisedo-engine-exp-1`,
+staging Worker/D1 `wisedo-engine-exp-1-staging`. `scripts/check-isolation.mjs` refuses the original
+`wisedo-engine-demo` Worker, its D1 and every `wisedo-catalog` resource; it runs in CI, in the tests and before every
+deploy step. Deploy: workflow "Deploy Exp-1 to Cloudflare" (target staging, then production).

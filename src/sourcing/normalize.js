@@ -31,7 +31,7 @@ export function cleanUrl(u) {
  * @param {string} provider
  * @returns {{candidates: any[], rejected: {index: number, reason: string}[], error: string|null}}
  */
-export function normalizeProviderOutput(raw, provider) {
+export function normalizeProviderOutput(raw, provider, now = null) {
   if (!raw || typeof raw !== 'object') return { candidates: [], rejected: [], error: 'output is not a JSON object' };
   const list = Array.isArray(raw) ? raw : Array.isArray(raw.candidates) ? raw.candidates : null;
   if (!list) return { candidates: [], rejected: [], error: 'output has no candidates array' };
@@ -71,6 +71,9 @@ export function normalizeProviderOutput(raw, provider) {
       fit_reasons: (Array.isArray(c.fit_reasons) ? c.fit_reasons : []).map((r) => str(r, 300)).filter(Boolean).slice(0, 5),
       confidence: conf !== null ? Math.max(0, Math.min(1, conf)) : null,
       evidence: str(c.evidence, 500),
+      evidence_urls: (Array.isArray(c.source_urls) ? c.source_urls : []).map(cleanUrl).filter(Boolean).slice(0, 4),
+      currency: 'EGP',
+      timestamp: now,
     });
   });
   return { candidates: candidates.slice(0, MAX_CANDIDATES_PER_PROVIDER), rejected, error: null };

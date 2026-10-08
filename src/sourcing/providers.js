@@ -10,11 +10,19 @@
 // never appear in results or errors. Add a provider by writing one more create*Provider and listing it in
 // providersFromEnv.
 
+import { postJson, ProviderError } from './http.js';
+import { createTavilyProvider, createSerperProvider } from './search-providers.js';
+
 export const DEFAULT_MODELS = {
+  gemini: 'gemini-3.8-flash',
+  groq: 'groq/compound',
+  mistral: 'mistral-medium-latest',
   openai: 'gpt-5',
   anthropic: 'claude-opus-5-5',
-  gemini: 'gemini-3.8-flash',
 };
+
+/** Default experiment mix: three LLM families (two of them web-grounded), one web search, one shopping search. */
+export const DEFAULT_PROVIDER_MIX = 'gemini,groq,mistral,tavily,serper';
 export const DEFAULT_TIMEOUT_MS = 90_000;
 
 /**
@@ -28,7 +36,9 @@ export const PRICES = {
   'claude-haiku-5-5': { in: 0.1, out: 0.5, per_search: 0.01, basis: 'Anthropic list price' },
   'gpt-5': { in: 1.25, out: 10, per_search: 0.01, basis: 'assumption (check OpenAI pricing)' },
   'gpt-5-mini': { in: 0.25, out: 2, per_search: 0.01, basis: 'assumption (check OpenAI pricing)' },
-  'gemini-3.8-flash': { in: 0.3, out: 2.5, per_search: 0.035, basis: 'assumption (check Gemini pricing; free tier may cost 0)' },
+  'gemini-3.8-flash': { in: 0.3, out: 2.5, per_search: 0.035, basis: 'paid-equivalent assumption; $0 on the AI Studio free tier' },
+  'groq/compound': { in: 0.15, out: 0.6, per_search: 0.008, basis: 'paid-equivalent assumption; $0 on the Groq free tier' },
+  'mistral-medium-latest': { in: 0.4, out: 2, per_search: 0, basis: 'paid-equivalent assumption; $0 on the Mistral Experiment plan' },
 };
 
 /** Estimated USD cost of one call. */
@@ -63,32 +73,6 @@ export function stripKeywords(schema, keys) {
   if (Array.isArray(schema)) return schema.map((x) => stripKeywords(x, keys));
   if (!schema || typeof schema !== 'object') return schema;
   return Object.fromEntries(Object.entries(schema).filter(([k]) => !keys.includes(k)).map(([k, v]) => [k, stripKeywords(v, keys)]));
-}
-
-class ProviderError extends Error {
-  constructor(message, status) { super(message); this.status = status; }
-}
-
-async function postJson(doFetch, url, headers, body, timeoutMs, label) {
-  const ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
-  let timer;
-  const timeout = new Promise((_, rej) => { timer = setTimeout(() => { if (ctl) ctl.abort(); rej(new ProviderError(`${label}: timeout after ${timeoutMs} ms`, 0)); }, timeoutMs); });
-  try {
-    const res = await Promise.race([doFetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body), ...(ctl ? { signal: ctl.signal } : {}) }), timeout]);
-    let data = null;
-    try { data = await Promise.race([res.json(), timeout]); } catch (e) { if (e instanceof ProviderError) throw e; data = null; }
-    if (!res.ok) {
-      const err = data && data.error;
-      const msg = err ? (typeof err === 'string' ? err : [err.type || err.status || err.code, err.message].filter(Boolean).join(' ')) : '';
-      throw new ProviderError(`${label}: HTTP ${res.status} ${String(msg).slice(0, 200)}`.trim(), res.status);
-    }
-    return data;
-  } catch (e) {
-    if (e instanceof ProviderError) throw e;
-    throw new ProviderError(`${label}: ${e && e.name === 'AbortError' ? `timeout after ${timeoutMs} ms` : String((e && e.message) || e).slice(0, 160)}`, 0);
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 /** Try request variants in order; move to the next only when the provider rejects the request shape (HTTP 400). */
@@ -128,7 +112,7 @@ export function createAnthropicProvider(opts) {
     { name: 'plain', search: false, schema: false, fallback: false },
   ];
   return {
-    name: 'anthropic',
+    name: 'anthropic', role: 'llm',
     model,
     async discover(req) {
       return runVariants(variants, async (v) => {
@@ -184,7 +168,7 @@ export function createOpenAiProvider(opts) {
     { name: 'plain', search: false, schema: null },
   ];
   return {
-    name: 'openai',
+    name: 'openai', role: 'llm',
     model,
     async discover(req) {
       return runVariants(variants, async (v) => {
@@ -235,7 +219,7 @@ export function createGeminiProvider(opts) {
     { name: 'plain', search: false, schema: false },
   ];
   return {
-    name: 'gemini',
+    name: 'gemini', role: 'llm',
     model,
     async discover(req) {
       return runVariants(variants, async (v) => {
@@ -269,32 +253,117 @@ export function createGeminiProvider(opts) {
   };
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Mistral (chat completions, json_schema). Knowledge only: no web tool. A different model family from the others.
+// ---------------------------------------------------------------------------------------------------------------
+
+/** OpenAI-compatible chat answer -> {text, usage}. */
+function chatAnswer(data) {
+  const ch = data && data.choices && data.choices[0];
+  const msg = (ch && ch.message) || {};
+  const text = typeof msg.content === 'string' ? msg.content : Array.isArray(msg.content) ? msg.content.map((c) => c.text || '').join('') : '';
+  const u = data.usage || {};
+  return { text, finish: ch && ch.finish_reason, msg, usage: { input_tokens: u.prompt_tokens || 0, output_tokens: u.completion_tokens || 0 } };
+}
+
 /**
- * The discovery providers this environment can use (a provider without its key is listed as unavailable).
+ * @param {{apiKey: string, model?: string, fetch?: typeof fetch, timeoutMs?: number}} opts
+ */
+export function createMistralProvider(opts) {
+  const model = opts.model || DEFAULT_MODELS.mistral;
+  const doFetch = opts.fetch || ((...a) => fetch(...a));
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const variants = [{ name: 'json_schema', format: 'schema' }, { name: 'json_object', format: 'object' }, { name: 'plain', format: null }];
+  return {
+    name: 'mistral', role: 'llm', model,
+    async discover(req) {
+      return runVariants(variants, async (v) => {
+        const data = await postJson(doFetch, 'https://api.mistral.ai/v1/chat/completions', { authorization: `Bearer ${opts.apiKey}` }, {
+          model,
+          messages: [{ role: 'system', content: req.system }, { role: 'user', content: req.user + (v.format === 'schema' ? '' : schemaNote(req)) }],
+          temperature: 0.2,
+          max_tokens: 6000,
+          ...(v.format === 'schema' ? { response_format: { type: 'json_schema', json_schema: { name: 'laptop_candidates', schema: stripKeywords(req.schema, ['maxItems']), strict: true } } } : {}),
+          ...(v.format === 'object' ? { response_format: { type: 'json_object' } } : {}),
+        }, timeoutMs, 'mistral');
+        const a = chatAnswer(data);
+        const usage = { ...a.usage, web_searches: 0 };
+        if (a.finish === 'length') return { ok: false, error: 'mistral: max_tokens', stopReason: 'max_tokens', model: data.model || model, usage };
+        const output = parseJsonObject(a.text);
+        if (!output) return { ok: false, error: 'mistral: answer is not JSON', stopReason: 'end_turn', model: data.model || model, usage };
+        return { ok: true, output, stopReason: 'end_turn', model: data.model || model, usage };
+      });
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Groq Compound (OpenAI-compatible chat; the system runs its own web search). JSON is asked in the prompt.
+// ---------------------------------------------------------------------------------------------------------------
+
+/**
+ * @param {{apiKey: string, model?: string, fetch?: typeof fetch, timeoutMs?: number, webSearch?: boolean}} opts
+ */
+export function createGroqProvider(opts) {
+  const model = opts.model || DEFAULT_MODELS.groq;
+  const doFetch = opts.fetch || ((...a) => fetch(...a));
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const variants = [{ name: 'search_settings', settings: true }, { name: 'plain', settings: false }];
+  return {
+    name: 'groq', role: 'llm', model,
+    async discover(req) {
+      return runVariants(variants, async (v) => {
+        const data = await postJson(doFetch, 'https://api.groq.com/openai/v1/chat/completions', { authorization: `Bearer ${opts.apiKey}` }, {
+          model,
+          messages: [{ role: 'system', content: req.system }, { role: 'user', content: req.user + schemaNote(req) }],
+          temperature: 0.2,
+          max_tokens: 8000,
+          ...(v.settings && opts.webSearch !== false ? { search_settings: { country: 'egypt' } } : {}),
+        }, timeoutMs, 'groq');
+        const a = chatAnswer(data);
+        const tools = Array.isArray(a.msg.executed_tools) ? a.msg.executed_tools : [];
+        const usage = { ...a.usage, web_searches: tools.filter((t) => /search|browser|visit/i.test(String(t.type || t.name || ''))).length };
+        if (a.finish === 'length') return { ok: false, error: 'groq: max_tokens', stopReason: 'max_tokens', model: data.model || model, usage };
+        const output = parseJsonObject(a.text);
+        if (!output) return { ok: false, error: 'groq: answer is not JSON', stopReason: 'end_turn', model: data.model || model, usage };
+        return { ok: true, output, stopReason: 'end_turn', model: data.model || model, usage };
+      });
+    },
+  };
+}
+
+/** Every provider this module can build: role, secret, factory. Add a provider by adding one row. */
+export const PROVIDER_REGISTRY = {
+  gemini: { role: 'llm', secret: 'GEMINI_API_KEY', make: (o, env) => createGeminiProvider({ ...o, model: env.GEMINI_DISCOVERY_MODEL || env.GEMINI_MODEL }) },
+  groq: { role: 'llm', secret: 'GROQ_API_KEY', make: (o, env) => createGroqProvider({ ...o, model: env.GROQ_DISCOVERY_MODEL }) },
+  mistral: { role: 'llm', secret: 'MISTRAL_API_KEY', make: (o, env) => createMistralProvider({ ...o, model: env.MISTRAL_DISCOVERY_MODEL }) },
+  tavily: { role: 'web_search', secret: 'TAVILY_API_KEY', make: (o) => createTavilyProvider({ ...o, timeoutMs: Math.min(o.timeoutMs, 25_000) }) },
+  serper: { role: 'shopping', secret: 'SERPER_API_KEY', make: (o) => createSerperProvider({ ...o, timeoutMs: Math.min(o.timeoutMs, 25_000) }) },
+  openai: { role: 'llm', secret: 'OPENAI_API_KEY', make: (o, env) => createOpenAiProvider({ ...o, model: env.OPENAI_DISCOVERY_MODEL }) },
+  anthropic: { role: 'llm', secret: 'ANTHROPIC_API_KEY', make: (o, env) => createAnthropicProvider({ ...o, model: env.ANTHROPIC_DISCOVERY_MODEL }) },
+};
+
+/**
+ * The discovery providers this environment can use, in DISCOVERY_PROVIDERS order. A provider without its secret is
+ * listed in `missing` (name and secret name only, never a value) and skipped.
  * @param {Record<string, any>} env
  * @param {{fetch?: typeof fetch}} [opts]
- * @returns {{available: any[], missing: {name: string, secret: string}[]}}
+ * @returns {{available: any[], missing: {name: string, role: string, secret: string}[], unknown: string[]}}
  */
 export function providersFromEnv(env, opts = {}) {
-  const order = String(env.DISCOVERY_PROVIDERS || 'openai,anthropic,gemini').split(',').map((s) => s.trim()).filter(Boolean);
+  const order = String(env.DISCOVERY_PROVIDERS || DEFAULT_PROVIDER_MIX).split(',').map((s) => s.trim()).filter(Boolean);
   const timeoutMs = Number(env.DISCOVERY_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
   const webSearch = String(env.DISCOVERY_WEB_SEARCH || '1') !== '0';
-  const key = (k) => String(env[k] || '').trim();
-  const available = [];
-  const missing = [];
+  const available = [], missing = [], unknown = [];
   for (const name of order) {
-    const common = { fetch: opts.fetch, timeoutMs, webSearch };
-    if (name === 'openai') {
-      if (key('OPENAI_API_KEY')) available.push(createOpenAiProvider({ ...common, apiKey: key('OPENAI_API_KEY'), model: env.OPENAI_DISCOVERY_MODEL }));
-      else missing.push({ name, secret: 'OPENAI_API_KEY' });
-    } else if (name === 'anthropic') {
-      if (key('ANTHROPIC_API_KEY')) available.push(createAnthropicProvider({ ...common, apiKey: key('ANTHROPIC_API_KEY'), model: env.ANTHROPIC_DISCOVERY_MODEL }));
-      else missing.push({ name, secret: 'ANTHROPIC_API_KEY' });
-    } else if (name === 'gemini') {
-      if (key('GEMINI_API_KEY')) available.push(createGeminiProvider({ ...common, apiKey: key('GEMINI_API_KEY'), model: env.GEMINI_DISCOVERY_MODEL || env.GEMINI_MODEL }));
-      else missing.push({ name, secret: 'GEMINI_API_KEY' });
-    }
+    const reg = PROVIDER_REGISTRY[name];
+    if (!reg) { unknown.push(name); continue; }
+    const apiKey = String(env[reg.secret] || '').trim();
+    if (!apiKey) { missing.push({ name, role: reg.role, secret: reg.secret }); continue; }
+    const p = reg.make({ apiKey, fetch: opts.fetch, timeoutMs, webSearch }, env);
+    p.role = p.role || reg.role;
+    p.priceOverride = parsePriceOverride(env[`${name.toUpperCase()}_PRICE`]);
+    available.push(p);
   }
-  for (const p of available) p.priceOverride = parsePriceOverride(env[`${p.name.toUpperCase()}_PRICE`]);
-  return { available, missing };
+  return { available, missing, unknown };
 }

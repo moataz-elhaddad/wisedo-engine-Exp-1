@@ -1,44 +1,76 @@
 {
-  // Wisedo engine EXPERIMENT 1 (Project B: multi-LLM product sourcing). Isolated from the original wisedo-engine-demo
-  // Worker and its D1: own Worker name, own D1 database. Never point this file at the original infrastructure.
-  // Layer 1 + Layer 2 API, the try-out page and the SKU page, over one tenant's catalog in D1.
+  // Wisedo engine EXPERIMENT 1 (Project B: multi-source product sourcing). A fully separate Cloudflare project:
+  //   production  Worker wisedo-engine-exp-1          D1 wisedo-engine-exp-1          (f749d540-...)
+  //   staging     Worker wisedo-engine-exp-1-staging  D1 wisedo-engine-exp-1-staging  (4bdf73d9-...)
+  // It must NEVER point at the original wisedo-engine-demo Worker, its D1, or any wisedo-catalog resource.
+  // scripts/check-isolation.mjs enforces this in the tests and before every deploy step.
   // Static files come from ./dist, built by `sh web/build.sh dist` (the deploy workflow does it).
   "name": "wisedo-engine-exp-1",
   "main": "worker/index.js",
   "compatibility_date": "2026-10-01",
-  "assets": {
-    "directory": "./dist",
-    "binding": "ASSETS",
-    "run_worker_first": ["/api/*"]
-  },
+  "workers_dev": true,
+  "assets": { "directory": "./dist", "binding": "ASSETS", "run_worker_first": ["/api/*"] },
   "vars": {
-    "TENANT": "demo-b2b",
-    "CLOCK": "demo",
-    // Free text reading: free LLMs in this order, then keyword rules. Gemini needs the GEMINI_API_KEY secret.
-    "LLM_ORDER": "gemini,workers-ai",
-    "GEMINI_MODEL": "gemini-3.8-flash",
-    "LLM_RATE_PER_MIN": "20",
-    // Experiment B (multi-LLM product discovery, /expb.html, /api/expb/*). Keys are secrets:
-    // OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY. A provider without its key is skipped and reported.
-    "DISCOVERY_PROVIDERS": "openai,anthropic,gemini",
-    "OPENAI_DISCOVERY_MODEL": "gpt-5",
-    "ANTHROPIC_DISCOVERY_MODEL": "claude-opus-5-5",
-    "GEMINI_DISCOVERY_MODEL": "gemini-3.8-flash",
-    "DISCOVERY_WEB_SEARCH": "1",
-    "DISCOVERY_TIMEOUT_MS": "90000",
-    "DISCOVERY_VERIFY": "1",
-    "DISCOVERY_VERIFY_MAX_URLS": "12",
-    "EXPB_RATE_PER_MIN": "4"
+      "EXPERIMENT": "exp-1-production",
+      "TENANT": "demo-b2b",
+      "CLOCK": "demo",
+      // Layer 1 free-text reader (unchanged): Gemini, then Workers AI, then keyword rules.
+      "LLM_ORDER": "gemini,workers-ai",
+      "GEMINI_MODEL": "gemini-3.8-flash",
+      "LLM_RATE_PER_MIN": "20",
+      // Experiment B provider mix. Secrets: GEMINI_API_KEY, GROQ_API_KEY, MISTRAL_API_KEY, TAVILY_API_KEY, SERPER_API_KEY.
+      // A provider without its secret is skipped and reported. Optional extra adapters: openai, anthropic.
+      "DISCOVERY_PROVIDERS": "gemini,groq,mistral,tavily,serper",
+      "GEMINI_DISCOVERY_MODEL": "gemini-3.8-flash",
+      "GROQ_DISCOVERY_MODEL": "groq/compound",
+      "MISTRAL_DISCOVERY_MODEL": "mistral-medium-latest",
+      "DISCOVERY_WEB_SEARCH": "1",
+      "DISCOVERY_TIMEOUT_MS": "90000",
+      "DISCOVERY_EVIDENCE": "1",
+      "DISCOVERY_EVIDENCE_PROVIDERS": "serper",
+      "DISCOVERY_EVIDENCE_MAX": "5",
+      "DISCOVERY_VERIFY": "1",
+      "DISCOVERY_VERIFY_MAX_URLS": "12",
+      "EXPB_RATE_PER_MIN": "4"
   },
   // Cloudflare Workers AI (free daily allocation, no key).
   "ai": { "binding": "AI" },
   "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "wisedo-engine-exp-1",
-      "database_id": "f749d540-7fc7-43a2-abbd-abf3e320831e",
-      "migrations_dir": "migrations"
-    }
+    { "binding": "DB", "database_name": "wisedo-engine-exp-1", "database_id": "f749d540-7fc7-43a2-abbd-abf3e320831e", "migrations_dir": "migrations" }
   ],
-  "observability": { "enabled": true }
+  "observability": { "enabled": true },
+  "env": {
+    "staging": {
+      "name": "wisedo-engine-exp-1-staging",
+      "workers_dev": true,
+      "vars": {
+      "EXPERIMENT": "exp-1-staging",
+      "TENANT": "demo-b2b",
+      "CLOCK": "demo",
+      // Layer 1 free-text reader (unchanged): Gemini, then Workers AI, then keyword rules.
+      "LLM_ORDER": "gemini,workers-ai",
+      "GEMINI_MODEL": "gemini-3.8-flash",
+      "LLM_RATE_PER_MIN": "20",
+      // Experiment B provider mix. Secrets: GEMINI_API_KEY, GROQ_API_KEY, MISTRAL_API_KEY, TAVILY_API_KEY, SERPER_API_KEY.
+      // A provider without its secret is skipped and reported. Optional extra adapters: openai, anthropic.
+      "DISCOVERY_PROVIDERS": "gemini,groq,mistral,tavily,serper",
+      "GEMINI_DISCOVERY_MODEL": "gemini-3.8-flash",
+      "GROQ_DISCOVERY_MODEL": "groq/compound",
+      "MISTRAL_DISCOVERY_MODEL": "mistral-medium-latest",
+      "DISCOVERY_WEB_SEARCH": "1",
+      "DISCOVERY_TIMEOUT_MS": "90000",
+      "DISCOVERY_EVIDENCE": "1",
+      "DISCOVERY_EVIDENCE_PROVIDERS": "serper",
+      "DISCOVERY_EVIDENCE_MAX": "5",
+      "DISCOVERY_VERIFY": "1",
+      "DISCOVERY_VERIFY_MAX_URLS": "12",
+      "EXPB_RATE_PER_MIN": "4"
+      },
+      "ai": { "binding": "AI" },
+      "d1_databases": [
+        { "binding": "DB", "database_name": "wisedo-engine-exp-1-staging", "database_id": "4bdf73d9-18ba-4b9a-837d-d63bf223ee37", "migrations_dir": "migrations" }
+      ],
+      "observability": { "enabled": true }
+    }
+  }
 }

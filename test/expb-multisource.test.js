@@ -1,0 +1,288 @@
+// Experiment B, multi-source: Mistral and Groq LLM adapters, Tavily web search, Serper shopping, listing parsing,
+// listing evidence and offers, the five-provider pipeline with partial failure, and the Exp-1 isolation guard.
+// No network: recorded responses through a fake fetch.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import * as F from './expb-fixtures.js';
+import { createMistralProvider, createGroqProvider, createGeminiProvider, providersFromEnv, DEFAULT_PROVIDER_MIX } from '../src/sourcing/providers.js';
+import { createTavilyProvider, createSerperProvider, candidateQuery } from '../src/sourcing/search-providers.js';
+import { parseListing, parsePrice, listingCandidate, listingMatches, isEgyptian } from '../src/sourcing/listings.js';
+import { buildDiscoveryRequest } from '../src/sourcing/discovery-prompt.js';
+import { normalizeProviderOutput } from '../src/sourcing/normalize.js';
+import { consolidate } from '../src/sourcing/consolidate.js';
+import { attachEvidence } from '../src/sourcing/evidence.js';
+import { discoverProducts, runProvider } from '../src/sourcing/discover.js';
+import { LLMProductDiscoverySource, recommendWith } from '../src/sourcing/product-source.js';
+import { validateSnapshot } from '../src/contracts.js';
+import { checkIsolation, loadFiles, parseJsonc, FORBIDDEN } from '../scripts/check-isolation.mjs';
+
+const REQ = buildDiscoveryRequest(F.PROFILE, F.laptopConfig);
+const norm = (c, provider = 'p') => normalizeProviderOutput({ candidates: [c] }, provider).candidates[0];
+const L = F.LISTINGS;
+const shop = (l, provider = 'serper', kind = 'shopping') => ({ provider, kind, title: l.title, url: l.link, price_text: l.price, source: l.source });
+
+function fiveProviders(f) {
+  return providersFromEnv({ GEMINI_API_KEY: 'g', GROQ_API_KEY: 'q', MISTRAL_API_KEY: 'm', TAVILY_API_KEY: 't', SERPER_API_KEY: 's' }, { fetch: f }).available;
+}
+
+// --- registry ------------------------------------------------------------------------------------------------
+
+test('default mix is 3 LLM families + 1 web search + 1 shopping; each provider is switchable', () => {
+  assert.equal(DEFAULT_PROVIDER_MIX, 'gemini,groq,mistral,tavily,serper');
+  const all = fiveProviders();
+  assert.deepEqual(all.map((p) => [p.name, p.role]), [['gemini', 'llm'], ['groq', 'llm'], ['mistral', 'llm'], ['tavily', 'web_search'], ['serper', 'shopping']]);
+  const only = providersFromEnv({ DISCOVERY_PROVIDERS: 'mistral,serper,nope', MISTRAL_API_KEY: 'm', SERPER_API_KEY: 's' });
+  assert.deepEqual(only.available.map((p) => p.name), ['mistral', 'serper']);
+  assert.deepEqual(only.unknown, ['nope']);
+});
+
+// --- Mistral -------------------------------------------------------------------------------------------------
+
+test('Mistral adapter: chat completions with strict json_schema, usage read; falls back to json_object on 400', async () => {
+  const f = F.fakeFetch({ mistral: (body) => (body.response_format && body.response_format.type === 'json_schema'
+    ? new Response(JSON.stringify({ message: 'schema not supported', type: 'invalid_request' }), { status: 400 })
+    : new Response(JSON.stringify(F.mistralResponse([F.X, F.Z])), { status: 200 })) });
+  const r = await createMistralProvider({ apiKey: 'mk-SECRET', fetch: f }).discover(REQ);
+  assert.equal(r.ok, true);
+  assert.equal(r.variant, 'json_object');
+  assert.equal(r.output.candidates.length, 2);
+  assert.deepEqual(r.usage, { input_tokens: 4000, output_tokens: 1500, web_searches: 0 });
+  assert.equal(f.calls[0].body.response_format.json_schema.strict, true);
+  assert.equal(f.calls[0].headers.authorization, 'Bearer mk-SECRET');
+  assert.equal(f.calls[0].body.model, 'mistral-medium-latest');
+  assert.ok(!JSON.stringify(r).includes('mk-SECRET'));
+});
+
+test('Mistral adapter: truncated answer is a failure', async () => {
+  const f = F.fakeFetch({ mistral: { choices: [{ finish_reason: 'length', message: { content: '{"candidates": [' } }], usage: {} } });
+  const r = await createMistralProvider({ apiKey: 'k', fetch: f }).discover(REQ);
+  assert.equal(r.ok, false);
+  assert.equal(r.stopReason, 'max_tokens');
+});
+
+// --- Groq ----------------------------------------------------------------------------------------------------
+
+test('Groq Compound adapter: web search settings, executed search tools counted, JSON asked in the prompt', async () => {
+  const f = F.fakeFetch({ groq: F.groqResponse([F.Y]) });
+  const r = await createGroqProvider({ apiKey: 'gq', fetch: f }).discover(REQ);
+  assert.equal(r.ok, true);
+  assert.equal(r.usage.web_searches, 2);
+  const b = f.calls[0].body;
+  assert.equal(b.model, 'groq/compound');
+  assert.deepEqual(b.search_settings, { country: 'egypt' });
+  assert.equal(b.response_format, undefined, 'compound gets the schema in the prompt');
+  assert.match(b.messages[1].content, /JSON schema/);
+});
+
+test('Groq adapter: unsupported search_settings (400) retries without them; prose answer fails', async () => {
+  const f = F.fakeFetch({ groq: (body) => (body.search_settings ? new Response('{"error":{"message":"unknown field search_settings"}}', { status: 400 }) : new Response(JSON.stringify(F.groqResponse([F.X])), { status: 200 })) });
+  const r = await createGroqProvider({ apiKey: 'k', fetch: f }).discover(REQ);
+  assert.equal(r.ok, true);
+  assert.equal(r.variant, 'plain');
+  const fp = F.fakeFetch({ groq: { choices: [{ finish_reason: 'stop', message: { content: 'Try the Lenovo IdeaPad.' } }], usage: {} } });
+  const rp = await createGroqProvider({ apiKey: 'k', fetch: fp }).discover(REQ);
+  assert.equal(rp.ok, false);
+  assert.match(rp.error, /not JSON/);
+});
+
+// --- Tavily --------------------------------------------------------------------------------------------------
+
+test('Tavily adapter: web search for the need, Egypt boost, listings with URLs; evidence per candidate', async () => {
+  const f = F.fakeFetch({ tavily: F.tavilyResponse([L.ideapad, L.vivobook]) });
+  const t = createTavilyProvider({ apiKey: 'tvly-SECRET', fetch: f });
+  const r = await t.discover(REQ);
+  assert.equal(r.ok, true);
+  assert.equal(r.listings.length, 2);
+  assert.equal(r.listings[0].kind, 'web');
+  const b = f.calls[0].body;
+  assert.equal(b.country, 'egypt');
+  assert.equal(b.search_depth, 'basic');
+  assert.match(b.query, /16GB RAM/);
+  assert.match(b.query, /under 40000 EGP/);
+  assert.equal(f.calls[0].headers.authorization, 'Bearer tvly-SECRET');
+  const ev = await t.evidence([{ key: 'c1', brand: 'Lenovo', model: 'IdeaPad Slim 3 15IAH8', cpu: 'Intel Core i5-12450H', ram_gb: 16, storage_gb: 512 }]);
+  assert.equal(ev.usage.credits, 1);
+  assert.ok(ev.listings.every((l) => l.for_key === 'c1'));
+});
+
+// --- Serper --------------------------------------------------------------------------------------------------
+
+test('Serper adapter: Google Shopping (gl=eg) plus a search on Egyptian retailers; one endpoint failing is a warning', async () => {
+  const f = F.fakeFetch({ serper_shopping: F.serperShopping([L.ideapad, L.mouse]), serper_search: () => new Response('{"message":"quota"}', { status: 429 }) });
+  const r = await createSerperProvider({ apiKey: 'srp', fetch: f }).discover(REQ);
+  assert.equal(r.ok, true);
+  assert.equal(r.listings.length, 2);
+  assert.equal(r.listings[0].price_text, 'EGP 32,499.00');
+  assert.equal(r.warnings.length, 1);
+  const shopCall = f.calls.find((c) => c.url.endsWith('/shopping'));
+  assert.equal(shopCall.body.gl, 'eg');
+  assert.equal(shopCall.headers['x-api-key'], 'srp');
+  const searchCall = f.calls.find((c) => c.url.endsWith('/search'));
+  assert.match(searchCall.body.q, /site:amazon\.eg/);
+});
+
+test('Serper adapter: both endpoints failing is a provider failure', async () => {
+  const f = F.fakeFetch({ serper_shopping: () => new Response('{}', { status: 403 }), serper_search: () => new Response('{}', { status: 403 }) });
+  const r = await runProvider(createSerperProvider({ apiKey: 's', fetch: f }), REQ, 5000);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /403/);
+});
+
+// --- listings ------------------------------------------------------------------------------------------------
+
+test('prices and currencies: EGP in English and Arabic forms, USD and others are kept apart', () => {
+  assert.deepEqual(parsePrice('EGP 32,499.00'), { price: 32499, currency: 'EGP' });
+  assert.deepEqual(parsePrice('٣٢٬٤٩٩ جنيه'.replace('٬', ',')), { price: 32499, currency: 'EGP' });
+  assert.deepEqual(parsePrice('E£ 45,000'), { price: 45000, currency: 'EGP' });
+  assert.deepEqual(parsePrice('32.999 ج.م'), { price: 32999, currency: 'EGP' });
+  assert.equal(parsePrice('$649.99').currency, 'USD');
+  assert.equal(parsePrice('AED 2,499').currency, 'OTHER');
+  assert.equal(parsePrice('no price here').price, null);
+  assert.equal(isEgyptian('https://www.noon.com/egypt-en/x/p/', null), true);
+  assert.equal(isEgyptian('https://www.noon.com/uae-en/x/p/', null), false);
+  assert.equal(isEgyptian('https://www.bestbuy.com/x', 'USD'), false);
+});
+
+test('a full shop listing becomes a candidate; accessories, USD listings and partial titles do not', () => {
+  const ok = listingCandidate(parseListing(shop(L.ideapad)), 't');
+  assert.equal(ok.brand, 'Lenovo');
+  assert.equal(ok.ram_gb, 16);
+  assert.equal(ok.storage_gb, 512);
+  assert.equal(ok.price_egp, 32499);
+  assert.equal(ok.offers[0].url, L.ideapad.link);
+  assert.equal(listingCandidate(parseListing(shop(L.mouse)), 't'), null);
+  assert.equal(listingCandidate(parseListing(shop(L.usd)), 't'), null, 'no EGP price');
+  assert.equal(listingCandidate(parseListing(shop({ ...L.ideapad, title: 'Lenovo IdeaPad Slim 3 laptop' })), 't'), null, 'configuration unknown');
+  const ar = parseListing(shop({ title: 'لاب توب لينوفو ايديا باد - انتل كور i5-12450H - رام 16 جيجا - 512 جيجا SSD', link: 'https://btech.com/ar/x', price: '32,999 جنيه' }));
+  assert.equal(ar.brand, 'Lenovo');
+  assert.equal(ar.ram_gb, 16);
+  assert.equal(ar.storage_gb, 512);
+  assert.equal(ar.price_egp, 32999);
+});
+
+test('incorrect evidence is rejected: a listing with another RAM, CPU or model never supports a candidate', () => {
+  const c = consolidate([norm(F.X, 'gemini')], ['gemini'])[0];
+  assert.equal(listingMatches(c, parseListing(shop(L.ideapad))).match, true);
+  assert.equal(listingMatches(c, parseListing(shop(L.ideapad8))).why, 'ram differs');
+  assert.equal(listingMatches(c, parseListing(shop({ ...L.ideapad, title: L.ideapad.title.replace('i5-12450H', 'i7-13620H') }))).why, 'cpu differs');
+  assert.equal(listingMatches(c, parseListing(shop(L.vivobook))).match, false);
+  assert.equal(listingMatches(c, parseListing(shop(L.mouse))).match, false);
+});
+
+test('listing evidence: Egyptian EGP listings become offers; foreign listings are evidence only', () => {
+  const products = consolidate([norm(F.X, 'gemini'), norm(F.Y, 'groq')], ['gemini', 'groq']);
+  attachEvidence(products, [shop(L.ideapad), shop(L.ideapad8), shop(L.usd), shop(L.mouse)]);
+  const lenovo = products.find((p) => p.brand === 'Lenovo');
+  const hp = products.find((p) => p.brand === 'HP');
+  assert.equal(lenovo.listing_evidence.length, 1);
+  assert.ok(lenovo.offers.some((o) => o.listing_price_egp === 32499 || (o.source === 'listing' && o.price_egp === 32499)), 'listing price attached to the shop offer');
+  assert.deepEqual(lenovo.evidence_providers, ['serper']);
+  assert.ok(lenovo.evidence_urls.includes(L.ideapad.link));
+  assert.equal(hp.listing_evidence.length, 1, 'the US listing names the product');
+  assert.equal(hp.offers.filter((o) => o.source === 'listing').length, 0, 'but a USD price is not an Egyptian offer');
+  assert.equal(hp.priced_listings, 0);
+});
+
+test('LLM candidate and shop listing of the same configuration merge; the shop counts as a provider that found it', () => {
+  const out = consolidate([norm(F.X, 'gemini'), norm(F.X_ALT, 'mistral'), listingCandidate(parseListing(shop(L.ideapad)), 't')], ['gemini', 'mistral', 'serper']);
+  assert.equal(out.length, 1);
+  assert.deepEqual(out[0].providers, ['gemini', 'mistral', 'serper']);
+  assert.equal(out[0].provider_consensus_score, 1);
+});
+
+test('candidate evidence queries carry the exact configuration', () => {
+  assert.equal(candidateQuery({ brand: 'Lenovo', model: 'IdeaPad Slim 3 15IAH8', cpu: 'Intel Core i5-12450H', ram_gb: 16, storage_gb: 1024 }), 'Lenovo IdeaPad Slim 3 15IAH8 i5-12450H 16GB 1TB');
+});
+
+// --- full pipeline -------------------------------------------------------------------------------------------
+
+function routes(over = {}) {
+  return {
+    gemini: F.geminiResponse([F.X, F.Y, F.Z]),
+    groq: F.groqResponse([F.X_ALT, F.Z]),
+    mistral: F.mistralResponse([F.X, F.A, { ...F.X, brand: 'Dell', model: 'XPS 15 9530', cpu: 'Intel Core i7-13700H', gpu: 'NVIDIA GeForce RTX 4060', price_egp: 95000, offers: [{ retailer: 'Amazon Egypt', url: null, price_egp: 95000 }] }]),
+    tavily: F.tavilyResponse([L.ideapad, { title: 'Best laptops for programming in Egypt 2026', link: 'https://example-reviews.com.eg/best', price: '' }]),
+    serper_shopping: F.serperShopping([L.ideapad, L.ideapad8, L.vivobook, L.mouse]),
+    serper_search: (body) => new Response(JSON.stringify(F.serperSearch(/Victus/.test(body.q) ? [L.usd] : /IdeaPad/.test(body.q) ? [L.ideapad] : [])), { status: 200 }),
+    ...over,
+  };
+}
+
+test('five providers: LLM + web + shopping evidence end to end, the unchanged engine ranks the result', async () => {
+  const f = F.fakeFetch(routes(), F.PAGES);
+  const d = await discoverProducts({ profile: F.PROFILE, config: F.laptopConfig, configs: F.CONFIGS, now: F.NOW, providers: fiveProviders(f), fetch: f });
+  assert.equal(d.ok, true);
+  assert.equal(d.metrics.providers_ok, 5);
+  assert.ok(d.metrics.evidence_searches >= 1 && d.metrics.evidence_searches <= 5);
+  const lenovo = d.consolidated.find((c) => c.brand === 'Lenovo' && c.ram_gb === 16);
+  assert.deepEqual([...lenovo.providers].sort(), ['gemini', 'groq', 'mistral', 'serper', 'tavily'], 'tavily found it as a priced page too');
+  assert.ok(['verified', 'listed'].includes(lenovo.verification_status));
+  assert.ok(lenovo.evidence_confidence >= 0.8);
+  const vivo16 = d.consolidated.find((c) => c.model.includes('X1605VA'));
+  assert.deepEqual(vivo16.providers, ['serper'], 'found only by the shopping provider');
+  assert.equal(validateSnapshot(d.snapshot).ok, true);
+  assert.ok(d.raw.find((r) => r.provider === 'serper').listings.length >= 3, 'raw provider outputs are kept for the UI');
+  assert.ok(d.providers.every((p) => typeof p.latency_ms === 'number' && p.usage));
+  const r = await recommendWith(new LLMProductDiscoverySource({ providers: fiveProviders(F.fakeFetch(routes(), F.PAGES)), configs: F.CONFIGS, fetch: F.fakeFetch({}, F.PAGES) }), F.PROFILE, F.NOW);
+  assert.equal(r.result.status, 'ok');
+  assert.ok(r.result.picks.every((p) => p.quote.price <= 40000 || p.affordability === 'stretch'));
+  assert.ok(!r.result.picks.some((p) => p.product.brand === 'Dell' && p.role === 'best_fit'), 'the over-budget XPS does not win');
+});
+
+test('partial success: two LLMs and the web search fail, shopping + one LLM still produce a Top 3', async () => {
+  const bad = () => new Response('{"error":{"message":"rate limit"}}', { status: 429 });
+  const f = F.fakeFetch(routes({ gemini: bad, groq: bad, tavily: bad }), F.PAGES);
+  const d = await discoverProducts({ profile: F.PROFILE, config: F.laptopConfig, configs: F.CONFIGS, now: F.NOW, providers: fiveProviders(f), fetch: f });
+  assert.equal(d.ok, true);
+  assert.equal(d.metrics.providers_ok, 2);
+  assert.deepEqual(d.providers.filter((p) => !p.ok).map((p) => p.provider).sort(), ['gemini', 'groq', 'tavily']);
+  assert.ok(d.providers.filter((p) => !p.ok).every((p) => /429/.test(p.error)));
+  assert.ok(d.snapshot.products.length >= 2);
+});
+
+test('zero success across all five: ok false, every provider has an error, nothing ranked', async () => {
+  const bad = () => new Response('{}', { status: 500 });
+  const f = F.fakeFetch({ gemini: bad, groq: bad, mistral: bad, tavily: bad, serper_shopping: bad, serper_search: bad });
+  const d = await discoverProducts({ profile: F.PROFILE, config: F.laptopConfig, configs: F.CONFIGS, now: F.NOW, providers: fiveProviders(f), fetch: f });
+  assert.equal(d.ok, false);
+  assert.equal(d.providers.filter((p) => p.error).length, 5);
+  assert.equal(d.snapshot.products.length, 0);
+});
+
+test('evidence phase can be switched off and is capped per request', async () => {
+  const f = F.fakeFetch(routes(), F.PAGES);
+  const off = await discoverProducts({ profile: F.PROFILE, config: F.laptopConfig, configs: F.CONFIGS, now: F.NOW, providers: fiveProviders(f), fetch: f, evidence: { enabled: false } });
+  assert.equal(off.metrics.evidence_searches, 0);
+  const f2 = F.fakeFetch(routes(), F.PAGES);
+  const capped = await discoverProducts({ profile: F.PROFILE, config: F.laptopConfig, configs: F.CONFIGS, now: F.NOW, providers: fiveProviders(f2), fetch: f2, evidence: { maxCandidates: 2 } });
+  assert.equal(capped.metrics.evidence_searches, 2);
+});
+
+test('Gemini stays a valid member of the new mix (grounded LLM)', async () => {
+  const f = F.fakeFetch({ gemini: F.geminiResponse([F.X]) });
+  const r = await createGeminiProvider({ apiKey: 'k', fetch: f }).discover(REQ);
+  assert.equal(r.ok, true);
+});
+
+// --- isolation -----------------------------------------------------------------------------------------------
+
+test('isolation: this repository only targets the Exp-1 Worker and D1 (production and staging)', () => {
+  const files = loadFiles();
+  assert.deepEqual(checkIsolation(files), []);
+  const cfg = parseJsonc(files.wranglerText);
+  assert.equal(cfg.name, 'wisedo-engine-exp-1');
+  assert.equal(cfg.env.staging.name, 'wisedo-engine-exp-1-staging');
+  for (const id of FORBIDDEN.d1Ids) assert.ok(!files.wranglerText.includes(id));
+});
+
+test('isolation: the guard rejects the original Worker, original D1, catalog resources and extra bindings', () => {
+  const files = loadFiles();
+  const mutate = (fn) => checkIsolation({ ...files, wranglerText: fn(files.wranglerText) });
+  assert.ok(mutate((t) => t.replace('"name": "wisedo-engine-exp-1",', '"name": "wisedo-engine-demo",')).some((p) => /wisedo-engine-demo/.test(p)));
+  assert.ok(mutate((t) => t.replace('f749d540-7fc7-43a2-abbd-abf3e320831e', '1855c8d1-7165-4627-90b5-03ccb7d7f2f7')).some((p) => /original database id/.test(p)));
+  assert.ok(mutate((t) => t.replace('"database_name": "wisedo-engine-exp-1-staging"', '"database_name": "wisedo-catalog-staging"')).length > 0);
+  assert.ok(mutate((t) => t.replace('"observability": { "enabled": true },', '"observability": { "enabled": true }, "kv_namespaces": [{ "binding": "X", "id": "abc" }],')).some((p) => /kv_namespaces/.test(p)));
+  assert.ok(mutate((t) => t.replace('"staging": {', '"prod2": {')).some((p) => /unknown environment/.test(p)));
+  const wf = checkIsolation({ ...files, workflows: { 'x.yml': 'run: npx wrangler d1 migrations apply wisedo-engine-demo --remote' } });
+  assert.ok(wf.some((p) => /wisedo-engine-demo/.test(p)));
+});

@@ -1,4 +1,9 @@
-# Wisedo engine (five categories: mobile, laptop, TV, AC, fridge)
+# Wisedo engine, Experiment 1 (five categories: mobile, laptop, TV, AC, fridge)
+
+> **This repository is Exp-1**: an isolated copy used for Experiment B (multi-source product sourcing: LLM + web
+> search + shopping search feeding the unchanged engines). It deploys only to its own Cloudflare Worker/D1
+> (`wisedo-engine-exp-1`, staging `wisedo-engine-exp-1-staging`); `scripts/check-isolation.mjs` blocks the original
+> infrastructure. See `docs/EXPB-NOTES.md`. Experiment page: `/expb.html`.
 
 Deterministic buying-decision engine in two layers, plain JavaScript (ES modules), Node 22, no npm dependencies.
 All data is synthetic sample data (every record has `source: "synthetic"`); prices are not real.
@@ -27,7 +32,7 @@ One tenant (`demo-b2b`) with its own SKU catalog, B2B style: the engine recommen
 - `migrations/` D1 schema; each row keeps the full contract record (docs/CONTRACTS.md) as JSON
 - `web/skus.html` SKU page: list, edit, add, delete products and offers; CSV export and import (the first form of the B2B upload)
 - `web/index.html` try-out page; when served by the Worker it reads the catalog from `api/snapshot`
-- Deploy: GitHub Actions, workflow "Deploy demo to Cloudflare" (manual). Repository secrets: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `WISEDO_ADMIN_TOKEN` (24+ characters). The first deploy loads the sample data.
+- Deploy: GitHub Actions, workflow "Deploy Exp-1 to Cloudflare" (manual; target staging, then production). Repository secrets: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `WISEDO_ADMIN_TOKEN` (24+ characters). The first deploy loads the sample data.
 - Clock: the demo runs on the sample data's frozen clock (`CLOCK=demo`) so the synthetic prices stay fresh; set `CLOCK=real` for real data.
 - Free text reading, all free: Google Gemini (optional `GEMINI_API_KEY` secret, free from Google AI Studio), then Cloudflare Workers AI (the `AI` binding, no key), then keyword rules (`src/layer1/u2-rules.js`) when both fail or none is set. Order in `LLM_ORDER`; `/api/health` lists the active providers. The two LLM adapters (`worker/llm.js`) are unverified until the first deploy.
 
