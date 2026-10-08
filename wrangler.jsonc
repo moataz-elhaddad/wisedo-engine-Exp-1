@@ -17,7 +17,18 @@
     // Free text reading: free LLMs in this order, then keyword rules. Gemini needs the GEMINI_API_KEY secret.
     "LLM_ORDER": "gemini,workers-ai",
     "GEMINI_MODEL": "gemini-3.8-flash",
-    "LLM_RATE_PER_MIN": "20"
+    "LLM_RATE_PER_MIN": "20",
+    // Experiment B (multi-LLM product discovery, /expb.html, /api/expb/*). Keys are secrets:
+    // OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY. A provider without its key is skipped and reported.
+    "DISCOVERY_PROVIDERS": "openai,anthropic,gemini",
+    "OPENAI_DISCOVERY_MODEL": "gpt-5",
+    "ANTHROPIC_DISCOVERY_MODEL": "claude-opus-5-5",
+    "GEMINI_DISCOVERY_MODEL": "gemini-3.8-flash",
+    "DISCOVERY_WEB_SEARCH": "1",
+    "DISCOVERY_TIMEOUT_MS": "90000",
+    "DISCOVERY_VERIFY": "1",
+    "DISCOVERY_VERIFY_MAX_URLS": "12",
+    "EXPB_RATE_PER_MIN": "4"
   },
   // Cloudflare Workers AI (free daily allocation, no key).
   "ai": { "binding": "AI" },

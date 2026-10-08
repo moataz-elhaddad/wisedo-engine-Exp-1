@@ -16,6 +16,7 @@ import { llmFor, llmProviders, allowLlmCall, checkProviders } from './llm.js';
 import { buildExtractionRequest } from '../src/layer1/u2-extract.js';
 import { buildCategoryRequest } from '../src/layer1/u1-category.js';
 import { MAX_TEXT_LENGTH } from '../src/layer1/session.js';
+import { expbRoute } from './expb.js';
 
 const DEFAULT_TENANT = 'demo-b2b';
 const MAX_BODY = 2_000_000;
@@ -266,6 +267,9 @@ async function route(request, env, url) {
     const extractReq = buildExtractionRequest(CONFIGS.laptop, 'عايز لابتوب للبرمجة في حدود 40 ألف كاش في القاهرة', { retailers: await store.listRetailers(env, tenant) });
     return json({ ok: true, category: await checkProviders(env, buildCategoryRequest('عايز لابتوب للمذاكرة')), extract: await checkProviders(env, extractReq) });
   }
+
+  // Experiment B (multi-LLM product sourcing): worker/expb.js
+  if (a === 'expb') return expbRoute(env, request, { tenant, tokenOk, readJson, json, HttpError }, b);
 
   throw new HttpError(404, `no route ${m} ${url.pathname}`);
 }

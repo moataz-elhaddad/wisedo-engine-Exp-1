@@ -1,4 +1,7 @@
 name: Deploy Exp-1 to Cloudflare
+# Exp-1 (Experiment B) ONLY: deploys the Worker "wisedo-engine-exp-1" with its own D1 "wisedo-engine-exp-1".
+# A guard step refuses to run if wrangler.jsonc points at the original wisedo-engine-demo Worker or its D1.
+# Optional provider secrets for Experiment B: OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY.
 # Manual only. Runs the tests, applies D1 migrations, builds the pages, deploys the Worker, sets the admin token,
 # loads the sample catalog when the store is empty (or when asked), then checks the live API.
 # Repository secrets: CLOUDFLARE_API_TOKEN (Workers Scripts Edit + D1 Edit), CLOUDFLARE_ACCOUNT_ID,
@@ -11,7 +14,7 @@ on:
         description: Replace the SKU store with the sample data (edits are lost)
         type: boolean
         default: false
-concurrency: deploy
+concurrency: deploy-exp-1
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -44,6 +47,14 @@ jobs:
           [ ${#tok} -ge 40 ] || bad="$bad CLOUDFLARE_API_TOKEN (expected 40+ letters/digits; create one under My Profile > API Tokens, not the Global API Key)"
           [ ${#acc} -eq 32 ] || bad="$bad CLOUDFLARE_ACCOUNT_ID (expected 32 hex characters)"
           if [ -n "$bad" ]; then echo "::error::Secret looks wrong:$bad"; exit 1; fi
+      - name: Isolation guard (never the original Worker or D1)
+        run: |
+          set -eu
+          if grep -q '"name": "wisedo-engine-demo"' wrangler.jsonc || grep -q '1855c8d1-7165-4627-90b5-03ccb7d7f2f7' wrangler.jsonc || grep -q '"database_name": "wisedo-engine-demo"' wrangler.jsonc; then
+            echo "::error::wrangler.jsonc points at the original wisedo-engine-demo infrastructure"; exit 1; fi
+          grep -q '"name": "wisedo-engine-exp-1"' wrangler.jsonc
+          grep -q 'f749d540-7fc7-43a2-abbd-abf3e320831e' wrangler.jsonc
+          echo "target: Worker wisedo-engine-exp-1, D1 wisedo-engine-exp-1 (f749d540-...)"
       - name: Check required secrets exist (values are never printed)
         env:
           ADMIN: ${{ secrets.WISEDO_ADMIN_TOKEN }}
@@ -81,6 +92,13 @@ jobs:
         run: |
           if [ -n "$GEMINI" ]; then printf '%s' "$GEMINI" | tr -d '[:space:]' | npx wrangler secret put GEMINI_API_KEY
           else echo "No GEMINI_API_KEY secret: free text uses Workers AI, then the keyword rules."; fi
+      - name: Set Experiment B provider keys (optional; values are never printed)
+        env:
+          OPENAI: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -n "$OPENAI" ]; then printf '%s' "$OPENAI" | tr -d '[:space:]' | npx wrangler secret put OPENAI_API_KEY; else echo "No OPENAI_API_KEY repository secret: OpenAI discovery is off."; fi
+          if [ -n "$ANTHROPIC" ]; then printf '%s' "$ANTHROPIC" | tr -d '[:space:]' | npx wrangler secret put ANTHROPIC_API_KEY; else echo "No ANTHROPIC_API_KEY repository secret: Anthropic discovery is off."; fi
       - name: Load sample catalog and verify
         env:
           URL: ${{ steps.deploy.outputs.url }}
@@ -125,7 +143,50 @@ jobs:
           tcode=$(curl -s -o t.json -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{"event":{"type":"start","text":"عايز لابتوب للبرمجة في حدود 40 ألف كاش في القاهرة"}}' "$URL/api/session")
           echo "free-text session: HTTP $tcode"; [ "$tcode" = 200 ] || { head -c 1500 t.json; echo; exit 1; }
           python3 -c 'import json;d=json.load(open("t.json"));s=d["state"];print("text reader:", s["texts"][0]["status"], s["texts"][0].get("llm",""));print("filled:", {k:v["value"] for k,v in s["values"].items()});assert s["values"].get("budget")'
+          # Experiment B smoke: page, provider status, then one real discovery run on a fixed laptop need.
+          echo "expb page: $(code "$URL/expb.html")"
+          curl -sf "$URL/api/expb/status" -o expb-status.json; echo "expb status: $(cat expb-status.json)"
+          curl -sf -X POST -H 'content-type: application/json' -d '{"event":{"type":"start","text":"I need a laptop for programming, budget 40000 EGP cash, Cairo"}}' "$URL/api/session" -o s1.json
+          python3 - <<'PY'
+          import json
+          d = json.load(open('s1.json'))
+          json.dump({"state": d["state"], "event": {"type": "showNow"}}, open('s2req.json', 'w'))
+          PY
+          curl -sf -X POST -H 'content-type: application/json' -d @s2req.json "$URL/api/session" -o s2.json
+          python3 -c 'import json;d=json.load(open("s2.json"));assert d["ui"]["screen"]=="result", d["ui"]["screen"];json.dump({"profile":d["ui"]["profile"]},open("run.json","w"));print("profile:", d["ui"]["profile"]["money"], [n["slot"] for n in d["ui"]["profile"]["needs"]])'
+          n=$(python3 -c 'import json;print(len(json.load(open("expb-status.json"))["providers"]))')
+          if [ "$n" -gt 0 ]; then
+            rc=$(curl -s -o expb-run.json -w '%{http_code}' --max-time 240 -X POST -H 'content-type: application/json' -H "Authorization: Bearer $ADMIN" -d @run.json "$URL/api/expb/run")
+            echo "expb run: HTTP $rc"
+            python3 - <<'PY'
+          import json
+          d = json.load(open('expb-run.json'))
+          print("status:", d.get("status"), "error:", d.get("error"))
+          print("metrics:", json.dumps(d.get("metrics")))
+          for p in d.get("providers", []):
+              print("provider:", p["provider"], p["model"], "ok" if p["ok"] else "FAIL", p.get("latency_ms"), "ms", p.get("candidate_count"), "cands", p.get("usage"), "$", p.get("cost_usd"), p.get("error") or "", p.get("variant"))
+          for c in d.get("consolidated", []):
+              print("cand:", c["key"], c["brand"], c["model"], c.get("cpu"), c.get("ram_gb"), c.get("storage_gb"), c.get("gpu"), c.get("price_egp"), c["providers"], c["verification_status"], c["evidence_confidence"])
+          for p in d.get("top3", []):
+              ds = p.get("discovery") or {}
+              print("TOP", p["rank"], p["role"], p["product"]["brand"], p["product"]["name"], p.get("price"), p.get("retailer"), "score", p.get("score"), ds.get("providers"), ds.get("verification_status"))
+          for p in (d.get("catalog") or {}).get("top3", []):
+              print("catalog TOP", p["rank"], p["product"]["name"], p.get("price"), p.get("score"))
+          PY
+          else
+            echo "No discovery provider key set: skipping the live Experiment B run."
+          fi
           echo "### Deployed: $URL" >> "$GITHUB_STEP_SUMMARY"
           echo "- Try-out: $URL/" >> "$GITHUB_STEP_SUMMARY"
           echo "- SKU catalog: $URL/skus.html" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Experiment B: $URL/expb.html" >> "$GITHUB_STEP_SUMMARY"
           echo "DEPLOYED_URL=$URL"
+      - name: Upload Experiment B smoke results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: expb-smoke
+          path: |
+            expb-status.json
+            expb-run.json
+          if-no-files-found: ignore

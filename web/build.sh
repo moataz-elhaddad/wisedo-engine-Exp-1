@@ -7,7 +7,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$HERE")"
 rm -rf "$OUT"
 mkdir -p "$OUT/config" "$OUT/data/synthetic"
-cp "$HERE/index.html" "$HERE/app.js" "$HERE/admin.js" "$HERE/skus.html" "$HERE/skus.js" "$OUT/"
+cp "$HERE/index.html" "$HERE/app.js" "$HERE/admin.js" "$HERE/skus.html" "$HERE/skus.js" "$HERE/expb.html" "$HERE/expb.js" "$OUT/"
 cp -r "$ROOT/src" "$OUT/src"
 rm -f "$OUT/src/layer1/llm/anthropic.js"   # needs the Node SDK; not used in the browser
 cp "$ROOT/config/"*.json "$OUT/config/"
