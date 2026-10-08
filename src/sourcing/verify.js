@@ -74,6 +74,7 @@ export function pageCurrency(html) {
   return null;
 }
 
+const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
 const num = (v) => {
   const s = String(v ?? '').replace(/[^\d.,]/g, '');
   const n = /^\d{1,3}(,\d{3})+(\.\d+)?$/.test(s) || /^\d+(\.\d+)?$/.test(s) ? Number(s.replace(/,/g, '')) : /^\d{1,3}(\.\d{3})+(,\d+)?$/.test(s) ? Number(s.replace(/\./g, '').replace(',', '.')) : NaN;
@@ -102,7 +103,7 @@ function ldProducts(html) {
  * appear in templates, translations and related-product widgets on in-stock pages (live: 14 false rejections).
  * @returns {{price: number|null, currency: string|null, availability: 'in_stock'|'out_of_stock'|null, source: string|null}}
  */
-export function pageOffer(html) {
+export function pageOffer(html, url = '') {
   const avail = (v) => (v == null ? null : /InStock|PreOrder|LimitedAvailability|OnlineOnly|InStoreOnly|BackOrder|in stock/i.test(String(v)) ? 'in_stock'
     : /OutOfStock|SoldOut|Discontinued|out of stock/i.test(String(v)) ? 'out_of_stock' : null);
   for (const p of ldProducts(html)) {
@@ -120,7 +121,13 @@ export function pageOffer(html) {
   const ic = html.match(/itemprop=["']priceCurrency["'][^>]*content=["']([A-Za-z]{3})["']/i);
   const ia = html.match(/itemprop=["']availability["'][^>]*(?:href|content)=["']([^"']+)["']/i);
   if (ip && num(ip[1])) return { price: num(ip[1]), currency: ic ? ic[1].toUpperCase() : null, availability: avail(ia && ia[1]), source: 'microdata' };
-  // Amazon renders stock in its #availability block, not in structured data.
+  // Amazon has no JSON-LD offer: its buy box carries the price ("priceAmount" / the core price block) and its
+  // #availability block the stock. Only on Amazon's own pages.
+  if (/(^|\.)amazon\.eg$/i.test(hostOf(url))) {
+    const pa = html.match(/"priceAmount"\s*:\s*([\d.]+)/) || html.match(/id=["']corePrice(?:Display_desktop)?_feature_div["'][\s\S]{0,4000}?class=["']a-offscreen["']>\s*(?:EGP|ج\.م\.?)(?:\s|&nbsp;)*([\d,.]+)/);
+    const azA = html.match(/id=["']availability["'][\s\S]{0,600}?(Currently unavailable|In Stock|غير متوفر حاليًا|متوفر)/i);
+    if (pa && num(pa[1])) return { price: num(pa[1]), currency: 'EGP', availability: azA ? (/unavailable|غير متوفر/i.test(azA[1]) ? 'out_of_stock' : 'in_stock') : null, source: 'amazon-buybox' };
+  }
   const az = html.match(/id=["']availability["'][\s\S]{0,600}?(Currently unavailable|In Stock|غير متوفر حاليًا|متوفر)/i);
   return { price: null, currency: null, availability: az ? (/unavailable|غير متوفر/i.test(az[1]) ? 'out_of_stock' : 'in_stock') : null, source: az ? 'amazon-availability' : null };
 }
@@ -188,7 +195,7 @@ export async function verifyUrl(url, cand, opts = {}) {
     if (!cmp.brand || (cmp.modelShare < 0.4 && !cmp.mpn)) status = 'mismatch';
     else if ((cmp.mpn || cmp.modelShare >= 0.6) && specOk) status = 'verified';
     else status = 'partial';
-    const offer = pageOffer(html);
+    const offer = pageOffer(html, res.url || url);
     if (status !== 'mismatch' && offer.availability === 'out_of_stock') status = 'unavailable';
     return { url, status, http: res.status, ms: ms(), title, final_url: res.url || url, match: cmp, page_prices: prices, page_currency: pageCurrency(html), page_offer: offer, bytes: html.length };
   } catch (e) {

@@ -13,7 +13,7 @@
 //                          - an identifiable retailer, not a classifieds or comparison site
 //                          - not unreachable / not out of stock when the page could be checked
 // A candidate without a verified offer is "discovered_unverified": reported with its exclusion reason, never ranked.
-import { parseListing, listingMatches, MIN_LAPTOP_PRICE_EGP } from './listings.js';
+import { parseListing, listingMatches, MIN_LAPTOP_PRICE_EGP, MAX_LAPTOP_PRICE_EGP } from './listings.js';
 import { classifyUrl } from './url-classify.js';
 import { verifyUrl } from './verify.js';
 
@@ -37,7 +37,8 @@ const STRONG = new Set(['mpn', 'model+specs']);
  * @param {{allowUsed?: boolean}} [opts]
  */
 export function collectOffers(products, listings, opts = {}) {
-  const parsed = listings.filter((l) => l && l.url).map((l) => ({ ...parseListing(l), cls: classifyUrl(l.url) }));
+  // Accessories ("battery for TUF F15") are neither evidence nor offers.
+  const parsed = listings.filter((l) => l && l.url).map((l) => ({ ...parseListing(l), cls: classifyUrl(l.url) })).filter((l) => !l.accessory);
   for (const p of products) {
     p.llm_claims = (p.offers || []).filter((o) => o.source !== 'listing').map((o) => ({
       provider: o.provider, retailer: o.retailer || null, url: o.url || null, price_egp: o.price_egp ?? null,
@@ -64,6 +65,9 @@ export function collectOffers(products, listings, opts = {}) {
       p.evidence_sources.push({ provider: l.provider, url: l.url, title: l.title, type: l.cls.type, country: l.cls.country, retailer: l.cls.retailer, price: l.price, currency: l.currency, strength: m.strength });
       if (l.cls.type !== 'direct_product') { reject(TYPE_REASON[l.cls.type] || 'no_direct_url', l.url); continue; }
       if (!l.cls.egypt) { reject('wrong_country', l.url, l.cls.country || 'not an Egyptian storefront'); continue; }
+      // A model-name-only hit is checked only when the listing itself states some configuration (a page check may
+      // then confirm the variant); bare model mentions are evidence, not leads.
+      if (!STRONG.has(m.strength) && !(l.cpu || l.ram_gb || l.storage_gb)) { reject('weak_evidence', l.url, 'listing states no configuration'); continue; }
       if (!potential.has(l.url)) {
         potential.set(l.url, { url: l.url, retailer: l.cls.retailer || l.source || l.cls.host, listing_price: l.currency === 'EGP' && l.price_from === 'field' ? l.price_egp : null, listing_currency: l.currency, strength: m.strength, provider: l.provider, via: 'listing' });
       } else if (!potential.get(l.url).listing_price && l.currency === 'EGP' && l.price_from === 'field') {
@@ -93,7 +97,8 @@ export async function verifyOffers(products, opts = {}) {
   const jobs = [];
   const seen = new Set();
   // Listing-backed leads first (they already carry a price and a variant signal), then LLM URLs.
-  const rank = (o) => (o.via === 'listing' ? (o.listing_price ? 0 : 1) : 2);
+  // Strong listing leads first (priced, then to be priced by the page), then LLM URLs, then weak listing leads.
+  const rank = (o) => (o.via === 'listing' ? (STRONG.has(o.strength) ? (o.listing_price ? 0 : 1) : 3) : 2);
   const ordered = products.flatMap((p) => (p._potential || []).map((o) => ({ p, o }))).sort((a, b) => rank(a.o) - rank(b.o));
   for (const j of ordered) {
     if (opts.enabled === false || jobs.length >= maxUrls || seen.has(j.o.url + '|' + j.p.key)) continue;
@@ -124,10 +129,10 @@ export function decideOffers(p, checkOf) {
     let price = o.listing_price, priceSource = 'listing';
     // The page's own structured offer (verify.js pageOffer); a bare "price" number elsewhere in the page is not used.
     const po = pc && pc.page_offer;
-    const pagePrice = po && po.price && (po.currency === 'EGP' || (!po.currency && pc.page_currency === 'EGP')) ? po.price : null;
+    const pagePrice = po && po.price && (po.currency === 'EGP' || (!po.currency && pc.page_currency === 'EGP')) && po.price <= MAX_LAPTOP_PRICE_EGP ? po.price : null;
     if (pagePrice && (pageStrong || !(price > 0))) { price = pagePrice; priceSource = 'page'; }
     if (!(price > 0)) { reject(po && po.currency && po.currency !== 'EGP' ? 'wrong_country' : 'no_egyptian_price', po && po.currency ? `page currency ${po.currency}` : pc ? `page check: ${pc.status}${pc.http ? ' HTTP ' + pc.http : ''}` : 'page not checked'); continue; }
-    if (price < MIN_LAPTOP_PRICE_EGP) { reject('implausible_price', `${price} EGP`); continue; }
+    if (price < MIN_LAPTOP_PRICE_EGP || price > MAX_LAPTOP_PRICE_EGP) { reject('implausible_price', `${price} EGP`); continue; }
     const floor = priceFloor(p.gpu);
     if (price < floor && priceSource !== 'page') { reject('implausible_price', `${price} EGP is below ${floor} EGP for ${p.gpu}; not confirmed by the product page`); continue; }
     p.verified_offers.push({

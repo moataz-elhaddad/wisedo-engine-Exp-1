@@ -61,6 +61,7 @@ function looksLikeProductSlug(path) {
   if (!seg) return false;
   const words = seg.replace(/\.html?$/, '').split(/[-_]+/).filter(Boolean);
   if (/^(laptops?|notebooks?|computers?|gaming|electronics|products?|shop|all|sale|offers|brands?|[a-z]{2})(\.html?)?$/.test(seg)) return false;
+  if (/(^|-)(guide|guides|best|top-\d+|vs|versus|review|reviews|comparison|tips|news|blog|deals)(-|$)/.test(seg)) return false; // articles
   return words.length >= 3 && seg.length >= 15 && (/\d/.test(seg) || /\.html?$/.test(seg) || /\/(product|products|p|item)\//.test(path));
 }
 

@@ -121,6 +121,13 @@ function modelOf(title, brand) {
 /**
  * @param {{provider: string, kind: string, title: string, url: string, snippet?: string, price_text?: string, source?: string}} l
  */
+/**
+ * Parts and accessories sold "for" a laptop model (keyboards, batteries, chargers, screens, fans, covers...). They
+ * name the model, so without this they match it (live: 11 of 20 page checks were spent on them).
+ */
+const ACCESSORY = /\b(replacement|compatible\s+(?:with|for)|for\s+(?:asus|lenovo|hp|dell|acer|msi|apple|macbook|huawei|samsung)\b|keyboard\s+(?:cover|skin|protector)|laptop\s+battery|battery\s+(?:for|\d{2,3}\s*wh)|\d{2,3}\s*wh\b|charger|ac\s+adapter|power\s+adapter|cooling\s+(?:fan|pad)|screws?\b|sleeve|carrying\s+case|screen\s+protector|keycaps?|motherboard|hinges?)\b|بطارية|شاحن|كيبورد\s+لـ|جراب/i;
+export function isAccessoryTitle(title) { return ACCESSORY.test(String(title || '')); }
+
 /** The words of a product URL's path: many Egyptian stores spell the full configuration in the slug. */
 function slugText(url) {
   try { return decodeURIComponent(new URL(url).pathname).replace(/\.html?$/, '').replace(/[-_/+]+/g, ' ').replace(/core\s*i([3579])\s+(\d{4,5}[a-z]*)/gi, 'core i$1-$2').replace(/corei([3579])/gi, 'core i$1'); } catch { return ''; }
@@ -154,7 +161,7 @@ export function parseListing(l) {
     storage_gb: storageOf(titleL) ?? storageOf(t),
     display: displayText(titleL) || displayText(t),
     price_egp: currency === 'EGP' ? price : null,
-    price, currency, price_from,
+    price, currency, price_from, accessory: isAccessoryTitle(l.title),
     retailer: l.source || host(l.url),
     host: host(l.url),
     egypt: isEgyptian(l.url, currency),
@@ -202,7 +209,7 @@ export function listingCandidate(p, now) {
   // supply it during verification, offers.js). Shopping hits always carry a structured price.
   const web = p.kind === 'web';
   if (!(p.kind === 'shopping' || (web && isEgyptianProductPage(p.url)))) return null;
-  if (!p.brand || !p.model) return null;
+  if (!p.brand || !p.model || p.accessory) return null;
   if (web && !(p.cpu && p.ram_gb && p.storage_gb)) return null;
   if (web && p.price_from !== 'field') p = { ...p, price_egp: null };
   if (!web && (p.price_egp === null || p.price_egp < MIN_LAPTOP_PRICE_EGP)) return null;

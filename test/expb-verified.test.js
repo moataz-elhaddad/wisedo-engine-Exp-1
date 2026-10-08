@@ -433,3 +433,34 @@ test('live regression: a candidate made from an evidence listing keeps its own U
   assert.equal(g15.verified_product_url, url);
   assert.equal(g15.verified_price, 36999);
 });
+
+// --- live-run regressions: page checks (staging, 2026-10-08) -----------------------------------------------------
+
+test('accessories that name the laptop model (battery, keyboard, charger, screen) are neither evidence nor offer leads', async () => {
+  const { isAccessoryTitle } = await import('../src/sourcing/listings.js');
+  for (const t of ['Asus TUF F15 FX506LH Battery new 48Wh', 'CASOSHIELD Keyboard Cover for ASUS TUF Gaming F15 FX506LH', '15.6" Screen Replacement for ASUS TUF Gaming F15 FX506',
+    'BestParts New CPU+GPU Cooling Fan Replacement for 2022 Asus ROG Strix G15', '180W Replacement Charger compatible for Asus ROG Zephyrus G14']) assert.equal(isAccessoryTitle(t), true, t);
+  for (const t of ['ASUS ROG Strix G15 G513RC-HF223 Gaming Laptop (AMD Ryzen 7-6800H, RTX 3050 4GB) Backlit Keyboard', 'ASUS TUF Gaming A15 FA506NCR Ryzen 7 7435HS 8GB 512GB RTX 3050']) assert.equal(isAccessoryTitle(t), false, t);
+  const url = 'https://www.amazon.eg/-/en/Asus-TUF-FX506LH-Battery-48Wh/dp/B08GJHQXBK';
+  const { p } = await run({ ...F.X, brand: 'Asus', model: 'TUF Gaming F15 FX506LH', cpu: 'Intel Core i5-10300H', gpu: 'NVIDIA GeForce GTX 1650', offers: [] }, [listing('Asus TUF F15 FX506LH Battery new 48Wh', url, 'EGP 1,999')]);
+  assert.equal(p.evidence_sources.length, 0);
+  assert.equal(p.rejections.length, 0);
+});
+
+test('Amazon.eg: the price comes from the buy box and stock from #availability (it has no JSON-LD offer)', async () => {
+  const { pageOffer } = await import('../src/sourcing/verify.js');
+  const html = '<div id="corePriceDisplay_desktop_feature_div"><span class="a-price"><span class="a-offscreen">EGP&nbsp;36,999.00</span></span></div><div id="availability"><span>In Stock</span></div>';
+  assert.deepEqual(pageOffer(html, 'https://www.amazon.eg/dp/B0D1234567'), { price: 36999, currency: 'EGP', availability: 'in_stock', source: 'amazon-buybox' });
+  assert.equal(pageOffer('{"priceAmount":41250.00}', 'https://www.amazon.eg/dp/B0D1234567').price, 41250);
+  assert.equal(pageOffer(html, 'https://example.com/x').price, null, 'buy-box rules only on Amazon');
+});
+
+test('a page price above the laptop ceiling is implausible; article slugs are not product pages', async () => {
+  const url = 'https://btech.com/en/p/asus-rog-strix-g15-g513rc-hn088w-ryzen-7-6800h-16gb-512gb-rtx-3050';
+  const cand = { ...F.X, brand: 'Asus', model: 'ROG Strix G15 G513RC', mpn: 'G513RC-HN088W', cpu: 'AMD Ryzen 7 6800H', gpu: 'NVIDIA GeForce RTX 3050', offers: [{ retailer: 'B.TECH', url, price_egp: 39000 }] };
+  const page = '<title>Asus ROG Strix G15 G513RC-HN088W Ryzen 7-6800H 16GB 512GB RTX 3050</title><script type="application/ld+json">{"@type":"Product","offers":{"@type":"Offer","price":"672076","priceCurrency":"EGP","availability":"InStock"}}</script>';
+  const { p } = await run(cand, [], { [url]: page });
+  assert.equal(p.status, 'discovered_unverified');
+  assert.equal(p.exclusion_reason, 'no_egyptian_price');
+  assert.notEqual(classifyUrl('https://hw-egypt.com/laptop-price-in-egypt-a-comprehensive-guide-for-2024').type, 'direct_product');
+});
