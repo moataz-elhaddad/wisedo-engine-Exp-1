@@ -29,6 +29,8 @@ const TYPE_REASON = {
   comparison: 'comparison_site', foreign_store: 'wrong_country', unknown: 'no_direct_url',
 };
 const STRONG = new Set(['mpn', 'model+specs']);
+export const UNCHECKABLE_HOSTS = ['noon.com', 'jumia.com.eg'];
+const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, '').toLowerCase(); } catch { return ''; } };
 
 /**
  * Collect evidence and potential offers for every candidate (no network).
@@ -100,14 +102,19 @@ export async function verifyOffers(products, opts = {}) {
   // Strong listing leads first (priced, then to be priced by the page), then LLM URLs, then weak listing leads.
   const rank = (o) => (o.via === 'listing' ? (STRONG.has(o.strength) ? (o.listing_price ? 0 : 1) : 3) : 2);
   const ordered = products.flatMap((p) => (p._potential || []).map((o) => ({ p, o }))).sort((a, b) => rank(a.o) - rank(b.o));
+  const skipped = [];
   for (const j of ordered) {
     if (opts.enabled === false || jobs.length >= maxUrls || seen.has(j.o.url + '|' + j.p.key)) continue;
     seen.add(j.o.url + '|' + j.p.key);
+    // Stores that always refuse checks from the Worker (live: Noon HTTP 520, Jumia 403) are not fetched, so the
+    // limited page-check budget goes to stores that answer. Never bypassed: such offers stay listing-only.
+    if (UNCHECKABLE_HOSTS.some((h) => hostOf(j.o.url) === h || hostOf(j.o.url).endsWith('.' + h))) { skipped.push(j); continue; }
     jobs.push(j);
   }
   const t0 = Date.now();
   const checks = new Map();
   await Promise.all(jobs.map(async ({ p, o }) => { checks.set(o.url + '|' + p.key, await verifyUrl(o.url, p, opts)); }));
+  for (const { p, o } of skipped) checks.set(o.url + '|' + p.key, { url: o.url, status: 'blocked', http: null, note: 'store blocks automated page checks (not attempted)' });
   for (const p of products) decideOffers(p, (url) => checks.get(url + '|' + p.key) || null);
   return { checked: jobs.length, ms: Date.now() - t0 };
 }
