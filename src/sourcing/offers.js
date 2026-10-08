@@ -107,7 +107,8 @@ export async function verifyOffers(products, opts = {}) {
   const rank = (o) => (o.via === 'listing' ? (STRONG.has(o.strength) ? (o.listing_price ? 0 : 1) : 3) : 2);
   const outOfReach = (p, o) => {
     if (!budget) return 0;
-    const hints = [o.listing_price, p.llm_claimed_price, ...(p.evidence_sources || []).map((e) => (e.currency === 'EGP' ? e.price : null))].filter((x) => x > 0);
+    // LLM price claims are not used even here (live: a 39,999 "Zephyrus G14" claim kept it at the front).
+    const hints = [o.listing_price, ...(p.evidence_sources || []).map((e) => (e.currency === 'EGP' ? e.price : null))].filter((x) => x > 0);
     return priceFloor(p.gpu) > budget * 1.1 || (hints.length && Math.min(...hints) > budget * 1.25) ? 10 : 0;
   };
   const ordered = products.flatMap((p) => (p._potential || []).map((o) => ({ p, o, w: rank(o) + outOfReach(p, o) }))).sort((a, b) => a.w - b.w);
