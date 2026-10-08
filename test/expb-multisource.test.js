@@ -1,10 +1,10 @@
-// Experiment B, multi-source: Mistral and Groq LLM adapters, Tavily web search, Serper shopping, listing parsing,
+// Experiment B, multi-source: Cohere and Groq LLM adapters, Tavily web search, Serper shopping, listing parsing,
 // listing evidence and offers, the five-provider pipeline with partial failure, and the Exp-1 isolation guard.
 // No network: recorded responses through a fake fetch.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as F from './expb-fixtures.js';
-import { createMistralProvider, createGroqProvider, createGeminiProvider, providersFromEnv, DEFAULT_PROVIDER_MIX } from '../src/sourcing/providers.js';
+import { createCohereProvider, createGroqProvider, createGeminiProvider, providersFromEnv, DEFAULT_PROVIDER_MIX } from '../src/sourcing/providers.js';
 import { createTavilyProvider, createSerperProvider, candidateQuery } from '../src/sourcing/search-providers.js';
 import { parseListing, parsePrice, listingCandidate, listingMatches, isEgyptian } from '../src/sourcing/listings.js';
 import { buildDiscoveryRequest } from '../src/sourcing/discovery-prompt.js';
@@ -22,42 +22,75 @@ const L = F.LISTINGS;
 const shop = (l, provider = 'serper', kind = 'shopping') => ({ provider, kind, title: l.title, url: l.link, price_text: l.price, source: l.source });
 
 function fiveProviders(f) {
-  return providersFromEnv({ GEMINI_API_KEY: 'g', GROQ_API_KEY: 'q', MISTRAL_API_KEY: 'm', TAVILY_API_KEY: 't', SERPER_API_KEY: 's' }, { fetch: f }).available;
+  return providersFromEnv({ GEMINI_API_KEY: 'g', GROQ_API_KEY: 'q', COHERE_API_KEY: 'c', TAVILY_API_KEY: 't', SERPER_API_KEY: 's' }, { fetch: f }).available;
 }
 
 // --- registry ------------------------------------------------------------------------------------------------
 
 test('default mix is 3 LLM families + 1 web search + 1 shopping; each provider is switchable', () => {
-  assert.equal(DEFAULT_PROVIDER_MIX, 'gemini,groq,mistral,tavily,serper');
+  assert.equal(DEFAULT_PROVIDER_MIX, 'gemini,groq,cohere,tavily,serper');
   const all = fiveProviders();
-  assert.deepEqual(all.map((p) => [p.name, p.role]), [['gemini', 'llm'], ['groq', 'llm'], ['mistral', 'llm'], ['tavily', 'web_search'], ['serper', 'shopping']]);
-  const only = providersFromEnv({ DISCOVERY_PROVIDERS: 'mistral,serper,nope', MISTRAL_API_KEY: 'm', SERPER_API_KEY: 's' });
-  assert.deepEqual(only.available.map((p) => p.name), ['mistral', 'serper']);
+  assert.deepEqual(all.map((p) => [p.name, p.role]), [['gemini', 'llm'], ['groq', 'llm'], ['cohere', 'llm'], ['tavily', 'web_search'], ['serper', 'shopping']]);
+  const only = providersFromEnv({ DISCOVERY_PROVIDERS: 'cohere,serper,nope', COHERE_API_KEY: 'c', SERPER_API_KEY: 's' });
+  assert.deepEqual(only.available.map((p) => p.name), ['cohere', 'serper']);
   assert.deepEqual(only.unknown, ['nope']);
 });
 
-// --- Mistral -------------------------------------------------------------------------------------------------
+// --- Cohere --------------------------------------------------------------------------------------------------
 
-test('Mistral adapter: chat completions with strict json_schema, usage read; falls back to json_object on 400', async () => {
-  const f = F.fakeFetch({ mistral: (body) => (body.response_format && body.response_format.type === 'json_schema'
-    ? new Response(JSON.stringify({ message: 'schema not supported', type: 'invalid_request' }), { status: 400 })
-    : new Response(JSON.stringify(F.mistralResponse([F.X, F.Z])), { status: 200 })) });
-  const r = await createMistralProvider({ apiKey: 'mk-SECRET', fetch: f }).discover(REQ);
+test('Cohere adapter: v2 chat with JSON schema mode, model command-a-plus-05-2026, billed usage read', async () => {
+  const f = F.fakeFetch({ cohere: F.cohereResponse([F.X, F.Z]) });
+  const r = await createCohereProvider({ apiKey: 'co-SECRET', fetch: f }).discover(REQ);
   assert.equal(r.ok, true);
-  assert.equal(r.variant, 'json_object');
+  assert.equal(r.variant, 'json_schema');
   assert.equal(r.output.candidates.length, 2);
-  assert.deepEqual(r.usage, { input_tokens: 4000, output_tokens: 1500, web_searches: 0 });
-  assert.equal(f.calls[0].body.response_format.json_schema.strict, true);
-  assert.equal(f.calls[0].headers.authorization, 'Bearer mk-SECRET');
-  assert.equal(f.calls[0].body.model, 'mistral-medium-latest');
-  assert.ok(!JSON.stringify(r).includes('mk-SECRET'));
+  assert.deepEqual(r.usage, { input_tokens: 3500, output_tokens: 1400, web_searches: 0 });
+  const c = f.calls[0];
+  assert.equal(c.url, 'https://api.cohere.com/v2/chat');
+  assert.equal(c.body.model, 'command-a-plus-05-2026');
+  assert.equal(c.body.response_format.type, 'json_object');
+  assert.equal(c.body.response_format.json_schema.type, 'object');
+  assert.equal(c.body.messages[0].role, 'system');
+  assert.equal(c.headers.authorization, 'Bearer co-SECRET');
+  assert.ok(!JSON.stringify(r).includes('co-SECRET'));
 });
 
-test('Mistral adapter: truncated answer is a failure', async () => {
-  const f = F.fakeFetch({ mistral: { choices: [{ finish_reason: 'length', message: { content: '{"candidates": [' } }], usage: {} } });
-  const r = await createMistralProvider({ apiKey: 'k', fetch: f }).discover(REQ);
-  assert.equal(r.ok, false);
-  assert.equal(r.stopReason, 'max_tokens');
+test('Cohere adapter: schema rejected (400) falls back to plain JSON mode with the schema in the prompt', async () => {
+  const f = F.fakeFetch({ cohere: (body) => (body.response_format && body.response_format.json_schema
+    ? new Response(JSON.stringify({ message: 'invalid json_schema' }), { status: 400 })
+    : new Response(JSON.stringify(F.cohereResponse([F.Y])), { status: 200 })) });
+  const r = await createCohereProvider({ apiKey: 'k', fetch: f }).discover(REQ);
+  assert.equal(r.ok, true);
+  assert.equal(r.variant, 'json_object');
+  assert.match(f.calls[1].body.messages[1].content, /JSON schema/);
+  assert.equal(r.attempts[0].ok, false);
+});
+
+test('Cohere adapter: MAX_TOKENS, prose, auth error and timeout are failures that never leak the key', async () => {
+  const cut = await createCohereProvider({ apiKey: 'k', fetch: F.fakeFetch({ cohere: F.cohereResponse([], { finish_reason: 'MAX_TOKENS' }) }) }).discover(REQ);
+  assert.equal(cut.ok, false);
+  assert.equal(cut.stopReason, 'max_tokens');
+  const prose = await createCohereProvider({ apiKey: 'k', fetch: F.fakeFetch({ cohere: F.cohereResponse([], { message: { content: [{ type: 'text', text: 'Buy the IdeaPad.' }] } }) }) }).discover(REQ);
+  assert.equal(prose.ok, false);
+  assert.match(prose.error, /not JSON/);
+  const fa = F.fakeFetch({ cohere: () => new Response(JSON.stringify({ message: 'invalid api token' }), { status: 401 }) });
+  const auth = await createCohereProvider({ apiKey: 'co-SECRET', fetch: fa }).discover(REQ);
+  assert.equal(auth.ok, false);
+  assert.equal(fa.calls.length, 1, 'no retry on 401');
+  assert.ok(!auth.error.includes('co-SECRET'));
+  const slow = await runProvider(createCohereProvider({ apiKey: 'k', fetch: F.fakeFetch({ cohere: 'timeout' }), timeoutMs: 60 }), REQ, 5000);
+  assert.equal(slow.ok, false);
+  assert.match(slow.error, /timeout/);
+  assert.equal(slow.provider, 'cohere');
+  assert.equal(typeof slow.latency_ms, 'number');
+});
+
+test('Cohere observability: cost estimate uses the command-a-plus row; usage and latency are reported', async () => {
+  const r = await runProvider(createCohereProvider({ apiKey: 'k', fetch: F.fakeFetch({ cohere: F.cohereResponse([F.X]) }) }), REQ, 5000);
+  assert.equal(r.ok, true);
+  assert.equal(r.model, 'command-a-plus-05-2026');
+  assert.equal(r.cost_usd, Math.round(((3500 * 2.5 + 1400 * 10) / 1e6) * 10000) / 10000);
+  assert.match(r.cost_basis, /Cohere trial key/);
 });
 
 // --- Groq ----------------------------------------------------------------------------------------------------
@@ -184,9 +217,9 @@ test('listing evidence: Egyptian EGP listings become offers; foreign listings ar
 });
 
 test('LLM candidate and shop listing of the same configuration merge; the shop counts as a provider that found it', () => {
-  const out = consolidate([norm(F.X, 'gemini'), norm(F.X_ALT, 'mistral'), listingCandidate(parseListing(shop(L.ideapad)), 't')], ['gemini', 'mistral', 'serper']);
+  const out = consolidate([norm(F.X, 'gemini'), norm(F.X_ALT, 'cohere'), listingCandidate(parseListing(shop(L.ideapad)), 't')], ['gemini', 'cohere', 'serper']);
   assert.equal(out.length, 1);
-  assert.deepEqual(out[0].providers, ['gemini', 'mistral', 'serper']);
+  assert.deepEqual(out[0].providers, ['gemini', 'cohere', 'serper']);
   assert.equal(out[0].provider_consensus_score, 1);
 });
 
@@ -200,7 +233,7 @@ function routes(over = {}) {
   return {
     gemini: F.geminiResponse([F.X, F.Y, F.Z]),
     groq: F.groqResponse([F.X_ALT, F.Z]),
-    mistral: F.mistralResponse([F.X, F.A, { ...F.X, brand: 'Dell', model: 'XPS 15 9530', cpu: 'Intel Core i7-13700H', gpu: 'NVIDIA GeForce RTX 4060', price_egp: 95000, offers: [{ retailer: 'Amazon Egypt', url: null, price_egp: 95000 }] }]),
+    cohere: F.cohereResponse([F.X, F.A, { ...F.X, brand: 'Dell', model: 'XPS 15 9530', cpu: 'Intel Core i7-13700H', gpu: 'NVIDIA GeForce RTX 4060', price_egp: 95000, offers: [{ retailer: 'Amazon Egypt', url: null, price_egp: 95000 }] }]),
     tavily: F.tavilyResponse([L.ideapad, { title: 'Best laptops for programming in Egypt 2026', link: 'https://example-reviews.com.eg/best', price: '' }]),
     serper_shopping: F.serperShopping([L.ideapad, L.ideapad8, L.vivobook, L.mouse]),
     serper_search: (body) => new Response(JSON.stringify(F.serperSearch(/Victus/.test(body.q) ? [L.usd] : /IdeaPad/.test(body.q) ? [L.ideapad] : [])), { status: 200 }),
@@ -215,7 +248,7 @@ test('five providers: LLM + web + shopping evidence end to end, the unchanged en
   assert.equal(d.metrics.providers_ok, 5);
   assert.ok(d.metrics.evidence_searches >= 1 && d.metrics.evidence_searches <= 5);
   const lenovo = d.consolidated.find((c) => c.brand === 'Lenovo' && c.ram_gb === 16);
-  assert.deepEqual([...lenovo.providers].sort(), ['gemini', 'groq', 'mistral', 'serper', 'tavily'], 'tavily found it as a priced page too');
+  assert.deepEqual([...lenovo.providers].sort(), ['cohere', 'gemini', 'groq', 'serper', 'tavily'], 'tavily found it as a priced page too');
   assert.ok(['verified', 'listed'].includes(lenovo.verification_status));
   assert.ok(lenovo.evidence_confidence >= 0.8);
   const vivo16 = d.consolidated.find((c) => c.model.includes('X1605VA'));
@@ -242,7 +275,7 @@ test('partial success: two LLMs and the web search fail, shopping + one LLM stil
 
 test('zero success across all five: ok false, every provider has an error, nothing ranked', async () => {
   const bad = () => new Response('{}', { status: 500 });
-  const f = F.fakeFetch({ gemini: bad, groq: bad, mistral: bad, tavily: bad, serper_shopping: bad, serper_search: bad });
+  const f = F.fakeFetch({ gemini: bad, groq: bad, cohere: bad, tavily: bad, serper_shopping: bad, serper_search: bad });
   const d = await discoverProducts({ profile: F.PROFILE, config: F.laptopConfig, configs: F.CONFIGS, now: F.NOW, providers: fiveProviders(f), fetch: f });
   assert.equal(d.ok, false);
   assert.equal(d.providers.filter((p) => p.error).length, 5);

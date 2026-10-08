@@ -9,7 +9,7 @@ Layer 1 session (unchanged) -> final NeedProfile
        phase 1, in parallel, each with a hard deadline:
          gemini   llm         Gemini + Google Search grounding, structured JSON
          groq     llm         Groq Compound (open models + built-in web search)
-         mistral  llm         Mistral, knowledge only (a different model family)
+         cohere   llm         Cohere command-a-plus-05-2026, knowledge only (a different model family)
          tavily   web_search  pages about the need (Egypt boost)
          serper   shopping    Google Shopping (gl=eg) + Google results on Egyptian retailers
        normalise -> listings with full config + EGP price become candidates -> conservative consolidation

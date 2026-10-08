@@ -16,13 +16,13 @@ import { createTavilyProvider, createSerperProvider } from './search-providers.j
 export const DEFAULT_MODELS = {
   gemini: 'gemini-3.8-flash',
   groq: 'groq/compound',
-  mistral: 'mistral-medium-latest',
+  cohere: 'command-a-plus-05-2026',
   openai: 'gpt-5',
   anthropic: 'claude-opus-5-5',
 };
 
 /** Default experiment mix: three LLM families (two of them web-grounded), one web search, one shopping search. */
-export const DEFAULT_PROVIDER_MIX = 'gemini,groq,mistral,tavily,serper';
+export const DEFAULT_PROVIDER_MIX = 'gemini,groq,cohere,tavily,serper';
 export const DEFAULT_TIMEOUT_MS = 90_000;
 
 /**
@@ -38,7 +38,7 @@ export const PRICES = {
   'gpt-5-mini': { in: 0.25, out: 2, per_search: 0.01, basis: 'assumption (check OpenAI pricing)' },
   'gemini-3.8-flash': { in: 0.3, out: 2.5, per_search: 0.035, basis: 'paid-equivalent assumption; $0 on the AI Studio free tier' },
   'groq/compound': { in: 0.15, out: 0.6, per_search: 0.008, basis: 'paid-equivalent assumption; $0 on the Groq free tier' },
-  'mistral-medium-latest': { in: 0.4, out: 2, per_search: 0, basis: 'paid-equivalent assumption; $0 on the Mistral Experiment plan' },
+  'command-a-plus-05-2026': { in: 2.5, out: 10, per_search: 0, basis: 'paid-equivalent assumption (Command A list price); $0 on a Cohere trial key (1,000 calls/month)' },
 };
 
 /** Estimated USD cost of one call. */
@@ -254,7 +254,7 @@ export function createGeminiProvider(opts) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Mistral (chat completions, json_schema). Knowledge only: no web tool. A different model family from the others.
+// Cohere (v2 chat, JSON mode with a JSON schema). Knowledge only: no web tool. A different model family from the others.
 // ---------------------------------------------------------------------------------------------------------------
 
 /** OpenAI-compatible chat answer -> {text, usage}. */
@@ -266,32 +266,43 @@ function chatAnswer(data) {
   return { text, finish: ch && ch.finish_reason, msg, usage: { input_tokens: u.prompt_tokens || 0, output_tokens: u.completion_tokens || 0 } };
 }
 
+/** Cohere v2 chat answer -> {text, finish (lower case), usage}. */
+function cohereAnswer(data) {
+  const content = data && data.message && data.message.content;
+  const text = Array.isArray(content) ? content.filter((c) => !c.type || c.type === 'text').map((c) => c.text || '').join('') : typeof content === 'string' ? content : '';
+  const u = (data && data.usage) || {};
+  const t = u.billed_units || u.tokens || {};
+  return { text, finish: String((data && data.finish_reason) || '').toLowerCase(), usage: { input_tokens: t.input_tokens || 0, output_tokens: t.output_tokens || 0 } };
+}
+
 /**
  * @param {{apiKey: string, model?: string, fetch?: typeof fetch, timeoutMs?: number}} opts
  */
-export function createMistralProvider(opts) {
-  const model = opts.model || DEFAULT_MODELS.mistral;
+export function createCohereProvider(opts) {
+  const model = opts.model || DEFAULT_MODELS.cohere;
   const doFetch = opts.fetch || ((...a) => fetch(...a));
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  // JSON schema mode first; a model or account that rejects the schema falls back to plain JSON mode, then to text.
   const variants = [{ name: 'json_schema', format: 'schema' }, { name: 'json_object', format: 'object' }, { name: 'plain', format: null }];
   return {
-    name: 'mistral', role: 'llm', model,
+    name: 'cohere', role: 'llm', model,
     async discover(req) {
       return runVariants(variants, async (v) => {
-        const data = await postJson(doFetch, 'https://api.mistral.ai/v1/chat/completions', { authorization: `Bearer ${opts.apiKey}` }, {
+        const data = await postJson(doFetch, 'https://api.cohere.com/v2/chat', { authorization: `Bearer ${opts.apiKey}` }, {
           model,
-          messages: [{ role: 'system', content: req.system }, { role: 'user', content: req.user + (v.format === 'schema' ? '' : schemaNote(req)) }],
+          messages: [{ role: 'system', content: req.system }, { role: 'user', content: req.user + (v.format === 'schema' ? '\n\nAnswer with the JSON object only.' : schemaNote(req)) }],
           temperature: 0.2,
           max_tokens: 6000,
-          ...(v.format === 'schema' ? { response_format: { type: 'json_schema', json_schema: { name: 'laptop_candidates', schema: stripKeywords(req.schema, ['maxItems']), strict: true } } } : {}),
+          ...(v.format === 'schema' ? { response_format: { type: 'json_object', json_schema: stripKeywords(req.schema, ['maxItems', 'description']) } } : {}),
           ...(v.format === 'object' ? { response_format: { type: 'json_object' } } : {}),
-        }, timeoutMs, 'mistral');
-        const a = chatAnswer(data);
+        }, timeoutMs, 'cohere');
+        const a = cohereAnswer(data);
         const usage = { ...a.usage, web_searches: 0 };
-        if (a.finish === 'length') return { ok: false, error: 'mistral: max_tokens', stopReason: 'max_tokens', model: data.model || model, usage };
+        if (a.finish === 'max_tokens') return { ok: false, error: 'cohere: max_tokens', stopReason: 'max_tokens', model, usage };
+        if (a.finish === 'error' || a.finish === 'timeout') return { ok: false, error: `cohere: finish_reason ${a.finish}`, stopReason: a.finish, model, usage };
         const output = parseJsonObject(a.text);
-        if (!output) return { ok: false, error: 'mistral: answer is not JSON', stopReason: 'end_turn', model: data.model || model, usage };
-        return { ok: true, output, stopReason: 'end_turn', model: data.model || model, usage };
+        if (!output) return { ok: false, error: 'cohere: answer is not JSON', stopReason: 'end_turn', model, usage };
+        return { ok: true, output, stopReason: 'end_turn', model, usage };
       });
     },
   };
@@ -336,7 +347,7 @@ export function createGroqProvider(opts) {
 export const PROVIDER_REGISTRY = {
   gemini: { role: 'llm', secret: 'GEMINI_API_KEY', make: (o, env) => createGeminiProvider({ ...o, model: env.GEMINI_DISCOVERY_MODEL || env.GEMINI_MODEL }) },
   groq: { role: 'llm', secret: 'GROQ_API_KEY', make: (o, env) => createGroqProvider({ ...o, model: env.GROQ_DISCOVERY_MODEL }) },
-  mistral: { role: 'llm', secret: 'MISTRAL_API_KEY', make: (o, env) => createMistralProvider({ ...o, model: env.MISTRAL_DISCOVERY_MODEL }) },
+  cohere: { role: 'llm', secret: 'COHERE_API_KEY', make: (o, env) => createCohereProvider({ ...o, model: env.COHERE_DISCOVERY_MODEL }) },
   tavily: { role: 'web_search', secret: 'TAVILY_API_KEY', make: (o) => createTavilyProvider({ ...o, timeoutMs: Math.min(o.timeoutMs, 25_000) }) },
   serper: { role: 'shopping', secret: 'SERPER_API_KEY', make: (o) => createSerperProvider({ ...o, timeoutMs: Math.min(o.timeoutMs, 25_000) }) },
   openai: { role: 'llm', secret: 'OPENAI_API_KEY', make: (o, env) => createOpenAiProvider({ ...o, model: env.OPENAI_DISCOVERY_MODEL }) },

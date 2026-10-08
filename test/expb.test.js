@@ -412,7 +412,7 @@ test('worker: /api/expb/status reports configured providers and missing secrets'
   const { call } = await workerSetup({ GEMINI_API_KEY: 'g', SERPER_API_KEY: 's' });
   const r = await call('GET', '/api/expb/status', null, false);
   assert.deepEqual(r.body.providers.map((p) => [p.name, p.role]), [['gemini', 'llm'], ['serper', 'shopping']]);
-  assert.deepEqual(r.body.missing.map((m) => m.secret), ['GROQ_API_KEY', 'MISTRAL_API_KEY', 'TAVILY_API_KEY']);
+  assert.deepEqual(r.body.missing.map((m) => m.secret), ['GROQ_API_KEY', 'COHERE_API_KEY', 'TAVILY_API_KEY']);
   assert.equal(r.body.access, 'admin_token');
 });
 
@@ -451,6 +451,6 @@ test('worker: zero providers configured returns 502 with the missing secrets, no
   const r = await call('POST', '/api/expb/run', { profile: F.PROFILE });
   assert.equal(r.status, 502);
   assert.equal(r.body.ok, false);
-  assert.deepEqual(r.body.providers_missing.map((m) => m.secret), ['GEMINI_API_KEY', 'GROQ_API_KEY', 'MISTRAL_API_KEY', 'TAVILY_API_KEY', 'SERPER_API_KEY']);
+  assert.deepEqual(r.body.providers_missing.map((m) => m.secret), ['GEMINI_API_KEY', 'GROQ_API_KEY', 'COHERE_API_KEY', 'TAVILY_API_KEY', 'SERPER_API_KEY']);
   assert.equal(r.body.top3.length, 0);
 });

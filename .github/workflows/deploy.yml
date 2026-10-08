@@ -8,7 +8,7 @@ name: Deploy Exp-1 to Cloudflare
 # Repository secrets:
 #   CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID   deploy (token scopes: Workers Scripts Edit, D1 Edit)
 #   WISEDO_ADMIN_TOKEN                            24+ characters; unlocks discovery runs and admin routes
-#   GEMINI_API_KEY, GROQ_API_KEY, MISTRAL_API_KEY, TAVILY_API_KEY, SERPER_API_KEY   discovery providers (each optional)
+#   GEMINI_API_KEY, GROQ_API_KEY, COHERE_API_KEY, TAVILY_API_KEY, SERPER_API_KEY   discovery providers (each optional)
 on:
   workflow_dispatch:
     inputs:
@@ -96,12 +96,12 @@ jobs:
           WISEDO_ADMIN_TOKEN: ${{ secrets.WISEDO_ADMIN_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
           SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
         run: |
           set -eu
-          for name in WISEDO_ADMIN_TOKEN GEMINI_API_KEY GROQ_API_KEY MISTRAL_API_KEY TAVILY_API_KEY SERPER_API_KEY; do
+          for name in WISEDO_ADMIN_TOKEN GEMINI_API_KEY GROQ_API_KEY COHERE_API_KEY TAVILY_API_KEY SERPER_API_KEY; do
             val=$(printenv "$name" | tr -d '[:space:]' || true)
             if [ -n "$val" ]; then printf '%s' "$val" | npx wrangler secret put "$name" $ENVFLAG >/dev/null && echo "$name: set"
             else echo "$name: not provided (that provider stays off)"; fi

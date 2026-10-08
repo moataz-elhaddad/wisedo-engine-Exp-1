@@ -56,7 +56,12 @@ export const chatResponse = (candidates, extra = {}, msgExtra = {}) => ({
   id: 'chat_test', model: 'm', choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: JSON.stringify({ candidates }), ...msgExtra } }],
   usage: { prompt_tokens: 4000, completion_tokens: 1500 }, ...extra,
 });
-export const mistralResponse = (c, e) => chatResponse(c, { model: 'mistral-medium-latest', ...e });
+/** Cohere v2 chat response shape. */
+export const cohereResponse = (candidates, extra = {}) => ({
+  id: 'co_test', finish_reason: 'COMPLETE',
+  message: { role: 'assistant', content: [{ type: 'text', text: JSON.stringify({ candidates }) }] },
+  usage: { billed_units: { input_tokens: 3500, output_tokens: 1400 }, tokens: { input_tokens: 3600, output_tokens: 1400 } }, ...extra,
+});
 export const groqResponse = (c, e) => chatResponse(c, { model: 'groq/compound', ...e }, { executed_tools: [{ type: 'search', arguments: '{"query":"laptop egypt"}' }, { type: 'search' }] });
 
 /** Shop listing titles as they look on Egyptian retailers. */
@@ -84,7 +89,7 @@ export function fakeFetch(routes = {}, pages = {}) {
     const u = String(url);
     calls.push({ url: u, body: init.body ? JSON.parse(init.body) : null, headers: init.headers });
     const which = u.includes('api.openai.com') ? 'openai' : u.includes('api.anthropic.com') ? 'anthropic' : u.includes('generativelanguage') ? 'gemini'
-      : u.includes('api.mistral.ai') ? 'mistral' : u.includes('api.groq.com') ? 'groq' : u.includes('api.tavily.com') ? 'tavily'
+      : u.includes('api.cohere.com') ? 'cohere' : u.includes('api.groq.com') ? 'groq' : u.includes('api.tavily.com') ? 'tavily'
       : u.includes('google.serper.dev/shopping') ? 'serper_shopping' : u.includes('google.serper.dev/search') ? 'serper_search' : null;
     if (which) {
       const r = routes[which];
