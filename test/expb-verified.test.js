@@ -331,3 +331,38 @@ test('model fallback moves on after a timeout or an unusable answer', async () =
   assert.equal(r.ok, true);
   assert.deepEqual(r.model_attempts.map((x) => x.model), ['a', 'b', 'c']);
 });
+
+// --- live-run regressions (staging, 2026-10-08) ------------------------------------------------------------------
+
+test('live regression: specs spelled only in the URL slug still reject a different variant (TUF F15 FX506HC i7-11800H RTX 3050 is not i7-13700H RTX 4060)', async () => {
+  const cand = { ...F.X, brand: 'Asus', model: 'TUF Gaming F15 (FX506HC)', cpu: 'Intel Core i7-13700H', ram_gb: 16, storage_gb: 512, gpu: 'NVIDIA GeForce RTX 4060 8GB', price_egp: 34000, offers: [{ retailer: 'Sigma', url: null, price_egp: 34000 }] };
+  const url = 'https://egyptlaptop.com/laptops/asus-tuf-gaming-f15-fx506hc-ub74-intel-corei7-11800h-512gb-ssd-16gb-ram-nvidia-geforce-rtx-3050-4gb-15-6-inch-fhd-win-10?srsltid=x';
+  const products = consolidate([norm(cand, 'cohere')], ['cohere']);
+  collectOffers(products, [{ provider: 'serper', kind: 'web', for_key: products[0].key, title: 'Asus TUF Gaming F15 FX506HC', url, price_text: 'EGP 41,199.00' }]);
+  await verifyOffers(products, { fetch: F.fakeFetch({}, {}) });
+  assert.equal(products[0].status, 'discovered_unverified');
+  assert.equal(products[0].exclusion_reason, 'variant_mismatch');
+});
+
+test('a model-name match without the CPU or GPU agreeing is only "model" strength (weak evidence)', async () => {
+  const { parseListing, listingMatches } = await import('../src/sourcing/listings.js');
+  const cand = { brand: 'Asus', model: 'TUF Gaming F15 FX507ZC4', cpu: 'Intel Core i5-12500H', ram_gb: 16, storage_gb: 512, gpu: 'NVIDIA GeForce RTX 3050' };
+  const l = parseListing({ provider: 'serper', kind: 'web', title: 'ASUS TUF Gaming F15 FX507ZC4 16GB 512GB SSD', url: 'https://www.amazon.eg/dp/B0TUF50700', price_text: 'EGP 39,999' });
+  assert.equal(listingMatches(cand, l).strength, 'model');
+  const full = parseListing({ provider: 'serper', kind: 'web', title: 'ASUS TUF Gaming F15 FX507ZC4 Core i5-12500H 16GB 512GB RTX 3050', url: 'https://www.amazon.eg/dp/B0TUF50700', price_text: 'EGP 39,999' });
+  assert.equal(listingMatches(cand, full).strength, 'model+specs');
+});
+
+test('"nothing fits" is not padded with the engine\'s closest misses', async () => {
+  const { topThree } = await import('../worker/expb.js');
+  const products = consolidate([norm({ ...F.X, offers: [] }, 'a')], ['a']);
+  collectOffers(products, [F.EG_LISTINGS[0]]);
+  await verifyOffers(products, { fetch: F.fakeFetch({}, F.PAGES) });
+  const { snapshot, index } = buildEphemeralSnapshot(products, { configs: F.CONFIGS, category: 'laptop', now: F.NOW });
+  const poor = structuredClone(F.PROFILE);
+  poor.money.budget = 15000;
+  if (poor.derived) poor.derived.maxPrice = 15000;
+  const r = match(poor, snapshot, F.NOW, 'rank');
+  assert.notEqual(r.status, 'ok');
+  assert.equal(topThree(r, snapshot, index).length, 0);
+});

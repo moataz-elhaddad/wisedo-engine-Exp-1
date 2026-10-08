@@ -35,7 +35,13 @@ const pickRow = (pick, index) => {
     reasons: pick.reasons,
     notListed: pick.notListed,
     warnings: pick.warnings,
-    // Only verified Egyptian product pages reach the snapshot, so a ranked row always carries its direct link.
+    ...verifiedFields(meta),
+  };
+};
+
+/** Only verified Egyptian product pages reach the snapshot, so a ranked row always carries its direct link. */
+function verifiedFields(meta) {
+  return {
     verified: !!(meta && meta.verified_product_url),
     mpn: meta ? meta.mpn || null : null,
     variant_match_strength: meta ? meta.variant_match_strength || null : null,
@@ -44,7 +50,7 @@ const pickRow = (pick, index) => {
     verified_product_url: meta ? meta.verified_product_url || null : null,
     ...(meta ? { discovery: meta } : {}),
   };
-};
+}
 
 /**
  * Top 3 = the engine's role picks, continued down the engine's own ranked list ("others") when it named fewer than
@@ -54,14 +60,16 @@ export function topThree(result, snapshot, index) {
   const rows = (result.picks || []).map((p) => pickRow(p, index));
   const offers = new Map((snapshot.offers || []).map((o) => [o.id, o]));
   const shops = new Map((snapshot.retailers || []).map((r) => [r.id, r]));
-  for (const o of result.others || []) {
+  // Only a result that fits continues down the ranked list: after "nothing fits" / "no match" the engine's
+  // remaining rows are the closest misses (e.g. over budget), never recommendations.
+  for (const o of result.status === 'ok' ? result.others || [] : []) {
     if (rows.length >= 3) break;
     const offer = offers.get(o.offerId);
     const meta = index ? index[o.product.id] : null;
     rows.push({
       role: 'ranked', product: o.product, score: o.score, fit: o.fit, affordability: o.affordability,
       price: offer ? offer.price_egp : null, effCost: o.effCost, retailer: shops.get(o.retailerId) ? shops.get(o.retailerId).name : o.retailerId,
-      url: offer ? offer.url : null, reasons: [], notListed: [], warnings: [], ...(meta ? { discovery: meta } : {}),
+      url: offer ? offer.url : null, reasons: [], notListed: [], warnings: [], ...verifiedFields(meta),
     });
   }
   return rows.slice(0, 3).map((r, i) => ({ ...r, rank: i + 1 }));
@@ -122,7 +130,7 @@ async function runHandler(env, request, h) {
   const llmSource = new LLMProductDiscoverySource({
     providers: available, missing, configs: CONFIGS, requestId,
     verify: { enabled: String(env.DISCOVERY_VERIFY || '1') !== '0', maxUrls: Number(env.DISCOVERY_VERIFY_MAX_URLS) || 12, timeoutMs: Number(env.DISCOVERY_VERIFY_TIMEOUT_MS) || 5000 },
-    evidence: { enabled: String(env.DISCOVERY_EVIDENCE || '1') !== '0', maxCandidates: Number(env.DISCOVERY_EVIDENCE_MAX) || 6, providers: String(env.DISCOVERY_EVIDENCE_PROVIDERS || 'serper,tavily').split(',').map((x) => x.trim()) },
+    evidence: { enabled: String(env.DISCOVERY_EVIDENCE || '1') !== '0', maxCandidates: Number(env.DISCOVERY_EVIDENCE_MAX) || 10, providers: String(env.DISCOVERY_EVIDENCE_PROVIDERS || 'serper,tavily').split(',').map((x) => x.trim()) },
   });
   const [llm, cat] = await Promise.all([
     recommendWith(llmSource, profile, now),

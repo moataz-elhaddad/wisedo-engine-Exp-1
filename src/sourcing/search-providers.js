@@ -61,7 +61,9 @@ export function createTavilyProvider(opts) {
       const listings = await call(request.queries.web);
       return { ok: true, listings, usage: { search_calls: 1, credits }, model: `tavily-search:${depth}` };
     },
-    async evidence(cands) {
+    async evidence(allCands) {
+      // Tavily credits cost ~8x Serper's: only the first candidates (engine order) get a Tavily search.
+      const cands = allCands.slice(0, opts.maxEvidence ?? 5);
       const all = (await Promise.all(cands.map(async (c) => (await call(exactQueries(c).price, { max_results: 6, include_domains: EGYPT_DOMAINS })).map((l) => ({ ...l, for_key: c.key }))))).flat();
       return { ok: true, listings: all, usage: { search_calls: cands.length, credits: cands.length * credits } };
     },
@@ -97,8 +99,8 @@ export function createSerperProvider(opts) {
       // real listings, so two organic queries go there (all Egyptian stores, then the two largest catalogs).
       const all = await Promise.allSettled([
         shopping(`${request.queries.shopping} Egypt`),
-        search(`${request.queries.shopping} price EGP (${sites})`, 20),
-        search(`${request.queries.shopping} (site:amazon.eg OR site:noon.com/egypt-en OR site:btech.com)`, 20),
+        search(`${request.queries.shopping} price EGP (${sites})`),
+        search(`${request.queries.shopping} (site:amazon.eg OR site:noon.com/egypt-en OR site:btech.com)`),
       ]);
       if (all.every((x) => x.status === 'rejected')) throw all[0].reason;
       const listings = all.flatMap((x) => (x.status === 'fulfilled' ? x.value : []));

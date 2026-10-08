@@ -121,8 +121,13 @@ function modelOf(title, brand) {
 /**
  * @param {{provider: string, kind: string, title: string, url: string, snippet?: string, price_text?: string, source?: string}} l
  */
+/** The words of a product URL's path: many Egyptian stores spell the full configuration in the slug. */
+function slugText(url) {
+  try { return decodeURIComponent(new URL(url).pathname).replace(/\.html?$/, '').replace(/[-_/+]+/g, ' ').replace(/core\s*i([3579])\s+(\d{4,5}[a-z]*)/gi, 'core i$1-$2').replace(/corei([3579])/gi, 'core i$1'); } catch { return ''; }
+}
+
 export function parseListing(l) {
-  const text = `${l.title || ''} ${l.snippet || ''}`;
+  const text = `${l.title || ''} ${l.snippet || ''} ${slugText(l.url)}`;
   const t = lc(text);
   const titleL = lc(l.title || '');
   const brand = brandOf(l.title || '') || brandOf(text);
@@ -235,5 +240,7 @@ export function listingMatches(cand, p) {
   const hit = toks.filter((k) => flat.includes(k)).length / toks.length;
   if (hit < 0.75) return { match: false, strength: null, why: `model tokens ${hit.toFixed(2)}` };
   const specsSeen = [p.ram_gb, p.storage_gb, pt].filter(Boolean).length;
-  return { match: true, strength: specsSeen >= 2 ? 'model+specs' : 'model', why: `model tokens ${hit.toFixed(2)}, ${specsSeen} specs agree` };
+  // A model name is shared by many configurations: the processor or the graphics card must be seen agreeing too.
+  const coreSeen = !!(ct && pt) || !!(cg && pg);
+  return { match: true, strength: specsSeen >= 2 && coreSeen ? 'model+specs' : 'model', why: `model tokens ${hit.toFixed(2)}, ${specsSeen} specs agree${coreSeen ? '' : ', CPU/GPU not confirmed'}` };
 }
