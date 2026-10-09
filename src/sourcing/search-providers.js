@@ -67,7 +67,7 @@ export function createTavilyProvider(opts) {
     async evidence(allCands) {
       // Tavily credits cost ~8x Serper's: only the first candidates (engine order) get a Tavily search, an exact
       // model (+ MPN) query restricted to Egyptian store domains.
-      const cands = allCands.slice(0, opts.maxEvidence ?? 5);
+      const cands = allCands.slice(0, opts.maxEvidence ?? 3);
       const all = (await Promise.all(cands.map(async (c) => (await call(`${modelName(c)} ${c.mpn || ''} price Egypt`.replace(/\s+/g, ' ').trim(), { max_results: 8, include_domains: EGYPT_DOMAINS }))
         .map((l) => ({ ...l, for_key: c.key, search_kind: 'tavily_exact' }))))).flat();
       const search_diagnostics = Object.fromEntries(cands.map((c) => [c.key, { queries: 1, by_stage: { tavily_exact: 1 }, retailers_searched: [], direct_urls_found: 0 }]));

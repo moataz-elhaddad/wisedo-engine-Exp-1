@@ -611,3 +611,12 @@ test('live regression: the LLM MPN (83ER00ABED) exists nowhere, stores list 83ER
   assert.equal(products[1].status, 'verified');
   assert.equal(products[1].verified_product_url, btech, 'tracking parameters dropped');
 });
+
+test('page checks are spread across candidates: every candidate\'s first URL before anyone\'s second', async () => {
+  const mk = (i) => ({ ...F.X, brand: 'Lenovo', model: `IdeaPad Slim 3 15IAH${i}`, cpu: `Intel Core i5-1245${i}H`, offers: [0, 1, 2].map((k) => ({ retailer: 'B.TECH', url: `https://btech.com/en/p/lenovo-ideapad-slim-3-15iah${i}-variant-${k}-i5-16gb-512gb`, price_egp: 30000 })) });
+  const products = consolidate([0, 1, 2].map((i) => norm(mk(i), 'a')), ['a']);
+  collectOffers(products, []);
+  const f = F.fakeFetch({}, {});
+  await verifyOffers(products, { fetch: f, maxUrls: 3 });
+  assert.equal(new Set(f.calls.map((c) => c.url.match(/15iah(\d)/)[1])).size, 3);
+});

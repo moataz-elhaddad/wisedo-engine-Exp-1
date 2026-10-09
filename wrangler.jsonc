@@ -32,7 +32,7 @@
       "DISCOVERY_EVIDENCE_MAX": "12",
       "DISCOVERY_SEARCH_MAX_QUERIES": "90",
       "DISCOVERY_VERIFY": "1",
-      "DISCOVERY_VERIFY_MAX_URLS": "24",
+      "DISCOVERY_VERIFY_MAX_URLS": "30",
       "EXPB_RATE_PER_MIN": "4"
   },
   // Cloudflare Workers AI (free daily allocation, no key).
@@ -67,7 +67,7 @@
       "DISCOVERY_EVIDENCE_MAX": "12",
       "DISCOVERY_SEARCH_MAX_QUERIES": "90",
       "DISCOVERY_VERIFY": "1",
-      "DISCOVERY_VERIFY_MAX_URLS": "24",
+      "DISCOVERY_VERIFY_MAX_URLS": "30",
       "EXPB_RATE_PER_MIN": "4"
       },
       "ai": { "binding": "AI" },

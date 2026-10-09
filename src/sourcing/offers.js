@@ -107,7 +107,7 @@ export function collectOffers(products, listings, opts = {}) {
  * @param {{fetch?: typeof fetch, enabled?: boolean, maxUrls?: number, timeoutMs?: number}} [opts]
  */
 export async function verifyOffers(products, opts = {}) {
-  const maxUrls = opts.maxUrls ?? 20;
+  const maxUrls = opts.maxUrls ?? 30;
   const jobs = [];
   const seen = new Set();
   // Listing-backed leads first (they already carry a price and a variant signal), then LLM URLs.
@@ -123,7 +123,10 @@ export async function verifyOffers(products, opts = {}) {
     const hints = [o.listing_price, ...(p.evidence_sources || []).map((e) => (e.currency === 'EGP' ? e.price : null))].filter((x) => x > 0);
     return priceFloor(p.gpu) > budget * 1.1 || (hints.length && Math.min(...hints) > budget * 1.25) ? 10 : 0;
   };
-  const ordered = products.flatMap((p) => (p._potential || []).map((o) => ({ p, o, w: rank(o) + outOfReach(p, o) }))).sort((a, b) => a.w - b.w);
+  // Round-robin across candidates inside each tier: every candidate's best URL is checked before anyone's second
+  // (live: 246 direct URLs, 24 checks, 14 candidates left unchecked while others had several pages checked).
+  const ordered = products.flatMap((p) => (p._potential || []).map((o) => ({ p, o, w: rank(o) + outOfReach(p, o) })).sort((a, b) => a.w - b.w).map((j, n) => ({ ...j, n })))
+    .sort((a, b) => Math.floor(a.w / 10) - Math.floor(b.w / 10) || a.n - b.n || a.w - b.w);
   const skipped = [];
   for (const j of ordered) {
     if (opts.enabled === false || jobs.length >= maxUrls || seen.has(j.o.url + '|' + j.p.key)) continue;
