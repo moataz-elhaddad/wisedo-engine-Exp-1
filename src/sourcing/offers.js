@@ -19,7 +19,7 @@ import { verifyUrl } from './verify.js';
 
 /** Exclusion reasons, most informative first (the first one present becomes the candidate's exclusion_reason). */
 export const EXCLUSION_PRIORITY = [
-  'variant_mismatch', 'out_of_stock', 'unreachable', 'no_egyptian_price', 'implausible_price', 'weak_evidence', 'wrong_country',
+  'direct_url_found_blocked', 'direct_url_found_unchecked', 'variant_mismatch', 'out_of_stock', 'unreachable', 'no_egyptian_price', 'implausible_price', 'weak_evidence', 'wrong_country',
   'classified_listing', 'comparison_site', 'manufacturer_evidence_only', 'article_evidence_only', 'category_or_search_page', 'no_direct_url',
 ];
 
@@ -50,6 +50,7 @@ export function collectOffers(products, listings, opts = {}) {
     p.llm_claimed_retailer = (p.llm_claims.find((c) => c.retailer) || {}).retailer || null;
     p.evidence_sources = [];
     p.rejections = [];
+    p._links = [];
     const potential = new Map();
     const reject = (reason, url, detail) => p.rejections.push({ reason, url: url || null, ...(detail ? { detail } : {}) });
 
@@ -61,15 +62,26 @@ export function collectOffers(products, listings, opts = {}) {
       const m = listingMatches(p, l);
       if (!m.match) {
         // A conflicting variant is only meaningful on searches made for this candidate.
-        if (mine && /differs/.test(m.why) && l.cls.type === 'direct_product') reject('variant_mismatch', l.url, m.why);
+        if (mine && /differs/.test(m.why) && l.cls.type === 'direct_product') {
+          reject('variant_mismatch', l.url, m.why);
+          if (l.cls.egypt) p._links.push({ url: l.url, retailer: l.cls.retailer || l.cls.host, status: 'variant_mismatch', label: LINK_LABEL.variant_mismatch, direct: true, checked: false, provider: l.provider, detail: m.why });
+        }
         continue;
       }
       p.evidence_sources.push({ provider: l.provider, url: l.url, title: l.title, type: l.cls.type, country: l.cls.country, retailer: l.cls.retailer, price: l.price, currency: l.currency, strength: m.strength });
-      if (l.cls.type !== 'direct_product') { reject(TYPE_REASON[l.cls.type] || 'no_direct_url', l.url); continue; }
+      if (l.cls.type !== 'direct_product') {
+        reject(TYPE_REASON[l.cls.type] || 'no_direct_url', l.url);
+        if (l.cls.egypt && ['category', 'search_results'].includes(l.cls.type)) p._links.push({ url: l.url, retailer: l.cls.retailer || l.cls.host, status: 'category_or_search_page', label: LINK_LABEL.category_or_search_page, direct: false, checked: false, provider: l.provider });
+        continue;
+      }
       if (!l.cls.egypt) { reject('wrong_country', l.url, l.cls.country || 'not an Egyptian storefront'); continue; }
       // A model-name-only hit is checked only when the listing itself states some configuration (a page check may
       // then confirm the variant); bare model mentions are evidence, not leads.
-      if (!STRONG.has(m.strength) && !(l.cpu || l.ram_gb || l.storage_gb)) { reject('weak_evidence', l.url, 'listing states no configuration'); continue; }
+      if (!STRONG.has(m.strength) && !(l.cpu || l.ram_gb || l.storage_gb)) {
+        reject('weak_evidence', l.url, 'listing states no configuration');
+        p._links.push({ url: l.url, retailer: l.cls.retailer || l.cls.host, status: 'weak_match', label: LINK_LABEL.weak_match, direct: true, checked: false, provider: l.provider });
+        continue;
+      }
       if (!potential.has(l.url)) {
         potential.set(l.url, { url: l.url, retailer: l.cls.retailer || l.source || l.cls.host, listing_price: l.currency === 'EGP' && l.price_from === 'field' ? l.price_egp : null, listing_currency: l.currency, strength: m.strength, provider: l.provider, via: 'listing' });
       } else if (!potential.get(l.url).listing_price && l.currency === 'EGP' && l.price_from === 'field') {
@@ -137,32 +149,43 @@ export function decideOffers(p, checkOf) {
     const pc = checkOf(o.url);
     if (pc) p.page_checks.push({ url: o.url, status: pc.status, http: pc.http ?? null, title: (pc.title || '').slice(0, 120) || null, offer: pc.page_offer || null, ms: pc.ms ?? null, error: pc.error || pc.note || null });
     const reject = (reason, detail) => p.rejections.push({ reason, url: o.url, ...(detail ? { detail } : {}) });
-    if (pc && pc.status === 'mismatch') { reject('variant_mismatch', 'page names another product'); continue; }
-    if (pc && pc.status === 'unavailable') { reject('out_of_stock'); continue; }
-    if (pc && pc.http && [404, 410].includes(pc.http)) { reject('unreachable', `HTTP ${pc.http}`); continue; }
-    if (pc && pc.status === 'unreachable' && pc.final_url) { reject('unreachable', pc.note || 'redirected away from the product'); continue; }
+    const strong = STRONG.has(o.strength);
     const pageStrong = pc && pc.status === 'verified';
-    if (!STRONG.has(o.strength) && !pageStrong) { reject('weak_evidence', o.strength ? `only ${o.strength} matched` : 'page could not confirm the variant'); continue; }
-    // A price read from the verified product page itself is the freshest; then the listing; never an LLM claim.
-    let price = o.listing_price, priceSource = 'listing';
-    // The page's own structured offer (verify.js pageOffer); a bare "price" number elsewhere in the page is not used.
+    // A page that answered (not a block, not a timeout). Only such a page can make an offer "live verified": an exact
+    // URL on a store that blocks the Worker stays a lead (direct_url_found_blocked), however good the listing.
+    const fetched = !!(pc && pc.http && pc.http < 400 && ['verified', 'partial', 'unavailable', 'mismatch'].includes(pc.status));
     const po = pc && pc.page_offer;
     const pagePrice = po && po.price && (po.currency === 'EGP' || (!po.currency && pc.page_currency === 'EGP')) && po.price <= MAX_LAPTOP_PRICE_EGP ? po.price : null;
+    const lk = (status, extra = {}) => link(p, o, status, { strength: pageStrong ? 'page_verified' : o.strength, page_price: pagePrice, listing_price: o.listing_price || null, availability: po ? po.availability : null, ...extra });
+    if (pc && pc.status === 'mismatch') { reject('variant_mismatch', 'page names another product'); lk('variant_mismatch'); continue; }
+    if (pc && pc.status === 'unavailable') { reject('out_of_stock'); lk('out_of_stock'); continue; }
+    if (pc && ((pc.http && [404, 410].includes(pc.http)) || (pc.status === 'unreachable' && pc.final_url))) { reject('unreachable', pc.http && pc.http >= 400 ? `HTTP ${pc.http}` : pc.note || 'redirected away from the product'); lk('unreachable'); continue; }
+    if (!fetched) {
+      if (!strong) { reject('weak_evidence', 'page could not be checked and the listing does not confirm the variant'); lk('weak_match'); continue; }
+      if (!pc) { reject('direct_url_found_unchecked', 'page-check budget used up'); lk('not_checked'); continue; }
+      reject('direct_url_found_blocked', `${pc.status}${pc.http ? ' HTTP ' + pc.http : ''}${pc.note ? ': ' + pc.note : ''}`); lk('blocked'); continue;
+    }
+    if (!strong && !pageStrong) { reject('weak_evidence', o.strength ? `only ${o.strength} matched` : 'page could not confirm the variant'); lk('weak_match'); continue; }
+    // The page's own structured price first; then a structured listing price for that same (reachable) page; never an
+    // LLM claim, never free text.
+    let price = o.listing_price, priceSource = 'listing';
     if (pagePrice && (pageStrong || !(price > 0))) { price = pagePrice; priceSource = 'page'; }
-    if (!(price > 0)) { reject(po && po.currency && po.currency !== 'EGP' ? 'wrong_country' : 'no_egyptian_price', po && po.currency ? `page currency ${po.currency}` : pc ? `page check: ${pc.status}${pc.http ? ' HTTP ' + pc.http : ''}` : 'page not checked'); continue; }
-    if (price < MIN_LAPTOP_PRICE_EGP || price > MAX_LAPTOP_PRICE_EGP) { reject('implausible_price', `${price} EGP`); continue; }
+    if (!(price > 0)) { reject(po && po.currency && po.currency !== 'EGP' ? 'wrong_country' : 'no_egyptian_price', po && po.currency ? `page currency ${po.currency}` : `page check: ${pc.status}${pc.http ? ' HTTP ' + pc.http : ''}`); lk('no_price'); continue; }
+    if (price < MIN_LAPTOP_PRICE_EGP || price > MAX_LAPTOP_PRICE_EGP) { reject('implausible_price', `${price} EGP`); lk('no_price', { detail: `implausible ${price} EGP` }); continue; }
     const floor = priceFloor(p.gpu);
-    if (price < floor && priceSource !== 'page') { reject('implausible_price', `${price} EGP is below ${floor} EGP for ${p.gpu}; not confirmed by the product page`); continue; }
+    if (price < floor && priceSource !== 'page') { reject('implausible_price', `${price} EGP is below ${floor} EGP for ${p.gpu}; not confirmed by the product page`); lk('no_price', { detail: `implausible ${price} EGP` }); continue; }
     p.verified_offers.push({
       retailer: o.retailer, url: o.url, price_egp: price, currency: 'EGP', price_source: priceSource,
       match_strength: pageStrong ? (o.strength === 'mpn' ? 'mpn' : 'page_verified') : o.strength,
       page_check: pc ? pc.status : 'not_checked', provider: o.provider, via: o.via,
     });
+    lk('live_verified', { verified_price: price });
   }
   p.verified_offers.sort((a, b) => a.price_egp - b.price_egp);
   const best = p.verified_offers[0] || null;
   const reasons = new Set(p.rejections.map((r) => r.reason));
-  p.status = best ? 'verified' : 'discovered_unverified';
+  const blockedExact = (p.links || []).some((l) => l.status === 'blocked');
+  p.status = best ? 'verified' : blockedExact ? 'direct_url_found_blocked' : 'discovered_unverified';
   p.exclusion_reason = best ? null : (EXCLUSION_PRIORITY.find((r) => reasons.has(r)) || 'no_direct_url');
   p.verification_status = best ? (p.verified_offers.some((o) => o.page_check === 'verified') ? 'verified' : 'listed') : (p.evidence_sources.length ? 'evidence_only' : 'unverified');
   p.evidence_confidence = { verified: 0.9, listed: 0.8, evidence_only: 0.4, unverified: 0.2 }[p.verification_status];
@@ -175,8 +198,33 @@ export function decideOffers(p, checkOf) {
   p.variant_match_strength = ['mpn', 'page_verified', 'model+specs', 'model'].find((s) => strengths.includes(s)) || null;
   p.evidence_providers = [...new Set(p.evidence_sources.map((e) => e.provider))];
   p.evidence_urls = [...new Set([...p.evidence_sources.map((e) => e.url), ...(p.evidence_urls || [])])].filter(Boolean);
+  p.links = sortLinks([...(p.links || []), ...(p._links || [])]);
+  p.link_counts = {
+    direct_urls_found: p.links.filter((l) => l.direct).length,
+    direct_urls_checked: p.links.filter((l) => ['live_verified', 'variant_mismatch', 'out_of_stock', 'no_price', 'weak_match', 'unreachable'].includes(l.status) && l.checked).length,
+    direct_urls_blocked: p.links.filter((l) => l.status === 'blocked').length,
+    direct_urls_verified: p.links.filter((l) => l.status === 'live_verified').length,
+  };
   delete p._potential;
+  delete p._links;
   return p;
+}
+
+/** User-facing label of a link (never presents an unverified URL as a purchase offer). */
+export const LINK_LABEL = {
+  live_verified: 'verified', blocked: 'exact URL found, page blocked', not_checked: 'exact match, price unverified',
+  no_price: 'exact match, price unverified', weak_match: 'possible variant match', variant_mismatch: 'different variant (not this product)',
+  out_of_stock: 'out of stock on the store page', unreachable: 'page gone / redirected', category_or_search_page: 'search/category page',
+};
+const LINK_ORDER = ['live_verified', 'blocked', 'not_checked', 'no_price', 'weak_match', 'out_of_stock', 'variant_mismatch', 'unreachable', 'category_or_search_page'];
+
+function link(p, o, status, extra = {}) {
+  (p.links = p.links || []).push({ url: o.url, retailer: o.retailer || null, status, label: LINK_LABEL[status], direct: true, checked: status !== 'blocked' && status !== 'not_checked', provider: o.provider || null, via: o.via || null, ...extra });
+}
+
+function sortLinks(links) {
+  const seen = new Set();
+  return links.filter((l) => l.url && !seen.has(l.url) && seen.add(l.url)).sort((a, b) => LINK_ORDER.indexOf(a.status) - LINK_ORDER.indexOf(b.status)).slice(0, 20);
 }
 
 /**
@@ -203,6 +251,7 @@ export function candidateReport(p, productId) {
     evidence_confidence: p.evidence_confidence, exclusion_reason: p.exclusion_reason,
     rejections: dedupeRejections(p.rejections), country: p.country, currency: p.currency,
     variant_match_strength: p.variant_match_strength,
+    links: p.links || [], link_counts: p.link_counts || null, search: p.search || null,
     evidence_sources: (p.evidence_sources || []).slice(0, 12), page_checks: p.page_checks || [], fit_reasons: p.fit_reasons, possible_duplicates: p.possible_duplicates,
   };
 }

@@ -109,7 +109,7 @@ export function buildEphemeralSnapshot(products, ctx) {
     offers.push(...made);
     outProducts.push(product);
     index[id] = {
-      key: p.key, mpn: p.mpn, status: p.status || null,
+      key: p.key, mpn: p.mpn, status: p.status || null, links: (p.links || []).slice(0, 10), search: p.search || null,
       raw: { cpu: p.cpu, ram_gb: p.ram_gb, storage_gb: p.storage_gb, gpu: p.gpu, display: p.display, os: p.os, weight_kg: p.weight_kg, battery_hours: p.battery_hours },
       attr_mapping: mapping,
       providers: p.providers, provider_count: p.provider_count, provider_consensus_score: p.provider_consensus_score,

@@ -25,6 +25,18 @@ on:
         description: Run one real multi-source discovery request after deploying
         type: boolean
         default: true
+      need_text:
+        description: Need text for the live run (empty = the script's default case)
+        type: string
+        default: ''
+      edits:
+        description: Layer 1 chip edits for the live run, as JSON (empty = the script's default)
+        type: string
+        default: ''
+      inspect:
+        description: Product name to inspect in the live run output (links, searches)
+        type: string
+        default: 'IdeaPad Slim 3'
 concurrency: deploy-exp-1-${{ inputs.target }}
 jobs:
   deploy:
@@ -147,6 +159,9 @@ jobs:
         env:
           EXPB_URL: ${{ steps.deploy.outputs.url }}
           WISEDO_ADMIN_TOKEN: ${{ env.ADMIN_TOKEN }}
+          EXPB_TEXT: ${{ inputs.need_text }}
+          EXPB_EDITS: ${{ inputs.edits }}
+          EXPB_INSPECT: ${{ inputs.inspect }}
         run: |
           set -o pipefail
           python3 scripts/expb_smoke.py --require-providers 1 | tee expb-summary.txt

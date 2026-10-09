@@ -79,7 +79,11 @@ function showProfile(p) {
   if (p.category !== 'laptop') $('runmsg').innerHTML = '<span class="bad">Experiment B supports laptops only.</span>';
 }
 
-const VSTYLE = { verified: 'ok', listed: 'ok', evidence_only: 'warn', unverified: 'bad', discovered_unverified: 'warn' };
+const VSTYLE = { verified: 'ok', listed: 'ok', evidence_only: 'warn', unverified: 'bad', discovered_unverified: 'warn', direct_url_found_blocked: 'warn' };
+const LSTYLE = { live_verified: 'ok', blocked: 'warn', not_checked: 'warn', no_price: 'warn', weak_match: '', out_of_stock: 'bad', variant_mismatch: 'bad', unreachable: 'bad', category_or_search_page: '' };
+// Every useful URL with its label; only "verified" is a purchase offer.
+const links = (ls, n = 8) => (ls || []).slice(0, n).map((l) => `<div class="sub"><span class="chip ${LSTYLE[l.status] || ''}">${esc(l.label || l.status)}</span> ${esc(l.retailer || '')} ${link(l.url, (l.url || '').replace(/^https?:\/\/(www\.)?/, '').slice(0, 60))}${l.status === 'live_verified' && l.verified_price ? ` · <b>${egp(l.verified_price)}</b>` : l.page_price || l.listing_price ? ` · ${egp(l.page_price || l.listing_price)} (unverified)` : ''}</div>`).join('');
+const searchLine = (s, lc) => (s ? `<div class="sub">${s.queries} searches (${Object.entries(s.by_stage || {}).map(([k, v]) => `${k} ${v}`).join(', ')})${s.retailers_searched && s.retailers_searched.length ? ` · stores: ${esc(s.retailers_searched.join(', '))}` : ''}${lc ? ` · direct URLs found ${lc.direct_urls_found}, checked ${lc.direct_urls_checked}, blocked ${lc.direct_urls_blocked}, verified ${lc.direct_urls_verified}` : ''}</div>` : '');
 const vchip = (s) => `<span class="chip ${VSTYLE[s] || ''}">${esc(s || 'n/a')}</span>`;
 const link = (u, label) => (u ? `<a href="${esc(u)}" target="_blank" rel="noopener">${esc(label || u)}</a>` : '');
 const chips = (xs) => (xs || []).map((x) => `<span class="chip">${esc(x)}</span>`).join('');
@@ -89,6 +93,7 @@ const REASON = {
   weak_evidence: 'only the model family matched (variant not confirmed)', wrong_country: 'only found on non-Egyptian stores (UAE / Saudi / global)',
   classified_listing: 'only classifieds ads (Dubizzle/OLX)', comparison_site: 'only price-comparison pages', manufacturer_evidence_only: 'only the manufacturer spec page',
   article_evidence_only: 'only articles / reviews', category_or_search_page: 'only category or search pages', no_direct_url: 'no direct Egyptian product URL found',
+  direct_url_found_blocked: 'exact Egyptian product URL found, but the store blocks page checks (not verified)', direct_url_found_unchecked: 'exact URL found, page-check budget used up',
 };
 const specLine = (c) => [c.cpu, c.ram_gb && c.ram_gb + 'GB RAM', c.storage_gb && c.storage_gb + 'GB', c.gpu, c.display].filter(Boolean).join(' · ');
 
@@ -97,7 +102,8 @@ function showRun(d) {
   $('raw').textContent = JSON.stringify(d, null, 2);
   const m = d.metrics || {};
   const ex = Object.entries(m.excluded_by_reason || {}).map(([k, v]) => `${esc(k)} ${v}`).join(', ');
-  $('runmsg').innerHTML = `${d.ok ? '<span class="ok">done</span>' : `<span class="bad">${esc(d.error || 'failed')}</span>`} · ${m.providers_ok ?? 0}/${m.providers_called ?? 0} providers · ${m.raw_candidates ?? 0} raw → ${m.consolidated ?? 0} candidates → <b>${m.verified_products ?? 0} verified</b> (${m.verified_offers ?? 0} offers) · excluded: ${ex || 'none'} · ${((m.total_ms || 0) / 1000).toFixed(1)} s · est. $${m.estimated_cost_usd ?? 'n/a'}`;
+  $('runmsg').innerHTML = `${d.ok ? '<span class="ok">done</span>' : `<span class="bad">${esc(d.error || 'failed')}</span>`} · ${m.providers_ok ?? 0}/${m.providers_called ?? 0} providers · ${m.raw_candidates ?? 0} raw → ${m.consolidated ?? 0} candidates → <b>${m.verified_products ?? 0} verified</b> (${m.verified_offers ?? 0} offers) · excluded: ${ex || 'none'} · ${((m.total_ms || 0) / 1000).toFixed(1)} s · est. $${m.estimated_cost_usd ?? 'n/a'}
+    <br>searches: exact ${m.exact_model_searches ?? 0}, store-specific ${m.retailer_specific_searches ?? 0}, family ${m.family_searches ?? 0} · direct URLs found ${m.direct_urls_found ?? 0}, checked ${m.direct_urls_checked ?? 0}, blocked ${m.direct_urls_blocked ?? 0}, page-verified ${m.direct_urls_page_verified ?? 0}`;
   $('top3').innerHTML = (d.top3 || []).map((p) => {
     const ds = p.discovery || {};
     const reasons = (p.reasons || []).slice(0, 4).map((r) => `<li>${esc(en(r.text) || en(r) || r.code)}</li>`).join('');
@@ -105,6 +111,7 @@ function showRun(d) {
       <div class="sub">Variant: ${esc(specLine(ds.raw || {}))}${p.mpn ? ` · MPN ${esc(p.mpn)}` : ''} · match: ${esc(p.variant_match_strength || 'n/a')}</div>
       <div><b>${egp(p.verified_price ?? p.price)}</b> at <b>${esc(p.verified_retailer || p.retailer)}</b></div>
       <div>${link(p.verified_product_url || p.url, 'Direct product page ↗')}</div>
+      ${(p.links || []).length > 1 ? `<details><summary>${p.links.length} links found</summary>${links(p.links, 10)}</details>` : ''}
       <div>Status: ${vchip(ds.verification_status)} ${p.verified ? '<span class="chip ok">verified Egyptian listing</span>' : ''}</div>
       <div>Discovered by: ${chips(ds.providers)} consensus ${ds.provider_consensus_score ?? 'n/a'} (signal only)</div>
       <div class="sub">Evidence: ${chips(ds.evidence_providers) || 'none'} ${(ds.evidence_urls || []).slice(0, 4).map((u, i) => link(u, `src${i + 1}`)).join(' ')}</div>
@@ -119,11 +126,11 @@ function showRun(d) {
     <td>${chips(c.discovered_by)}<br>${c.provider_count} (${c.provider_consensus_score})</td>
     <td>${c.llm_claimed_price ? egp(c.llm_claimed_price) : 'n/a'}<br><span class="sub">${esc(c.llm_claimed_retailer || '')}</span></td>
     <td>${c.verified_price ? `<b>${egp(c.verified_price)}</b><br>${esc(c.verified_retailer)}<br>${link(c.verified_product_url, 'product page ↗')}` : '<span class="bad">none</span>'}</td>
-    <td>${vchip(c.verification_status)}<br>${esc(c.variant_match_strength || '')} ${c.country ? `· ${esc(c.country)} ${esc(c.currency)}` : ''}</td>
+    <td>${vchip(c.status === 'direct_url_found_blocked' ? c.status : c.verification_status)}<br>${esc(c.variant_match_strength || '')} ${c.country ? `· ${esc(c.country)} ${esc(c.currency)}` : ''}</td>
     <td>${c.exclusion_reason ? `<span class="warn">${esc(c.exclusion_reason)}</span><br><span class="sub">${esc(REASON[c.exclusion_reason] || '')}</span>` : '<span class="ok">rankable</span>'}
       ${(c.rejections || []).length ? `<details><summary>${c.rejections.length} rejected URL(s)</summary>${c.rejections.map((r) => `<div class="sub">${esc(r.reason)} ${link(r.url, (r.url || '').slice(0, 60))} ${esc(r.detail || '')}</div>`).join('')}</details>` : ''}</td>
-    <td>${(c.evidence_sources || []).slice(0, 5).map((e) => `<div class="sub">${esc(e.provider)} · ${esc(e.type)}${e.country ? ' ' + esc(e.country) : ''} ${link(e.url, (e.title || e.url || '').slice(0, 50))}</div>`).join('')}</td></tr>`;
-  const head = '<thead><tr><th>Product</th><th>Specs</th><th>Discovered by</th><th>LLM claim (unverified)</th><th>Verified offer</th><th>Status</th><th>Exclusion</th><th>Evidence</th></tr></thead>';
+    <td>${links(c.links)}${searchLine(c.search, c.link_counts)}</td></tr>`;
+  const head = '<thead><tr><th>Product</th><th>Specs</th><th>Discovered by</th><th>LLM claim (unverified)</th><th>Verified offer</th><th>Status</th><th>Exclusion</th><th>Links found (labelled) / searches</th></tr></thead>';
   const ver = d.verified_candidates || [], unv = d.unverified_candidates || [];
   $('cands').innerHTML = `<h3>Verified candidates (${ver.length})</h3><table>${head}<tbody>${ver.map(row).join('')}</tbody></table>`;
   $('unverified').innerHTML = `<div class="sub">Found by discovery, but no verified Egyptian direct product listing: never ranked, never in the Top results.</div><table>${head}<tbody>${unv.map(row).join('')}</tbody></table>`;

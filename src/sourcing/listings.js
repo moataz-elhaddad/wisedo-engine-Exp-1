@@ -10,7 +10,7 @@ import { modelTokens, cpuToken, gpuToken, signature } from './consolidate.js';
 
 /** Egyptian retailers' hosts (also used to decide whether a listing is relevant to Egypt). */
 export const EGYPT_HOSTS = ['amazon.eg', 'noon.com', 'btech.com', '2b.com.eg', 'rayashop.com', 'jumia.com.eg', 'dubaiphone.net', 'compumarts.com',
-  'elbadrgroupeg.store', 'elbadrgroup.com', 'sigma-computer.com', 'elarabygroup.com', 'select.com.eg', 'tradeline-stores.com', 'cairosales.com', 'carrefouregypt.com'];
+  'elbadrgroupeg.store', 'elbadrgroup.com', 'sigma-computer.com', 'elarabygroup.com', 'select.com.eg', 'tradeline-stores.com', 'cairosales.com', 'dream2000.com', 'carrefouregypt.com'];
 
 const BRAND_WORDS = [
   ['lenovo', 'Lenovo'], ['لينوفو', 'Lenovo'], ['hp', 'HP'], ['اتش بي', 'HP'], ['إتش بي', 'HP'], ['dell', 'Dell'], ['ديل', 'Dell'],

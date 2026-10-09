@@ -18,8 +18,9 @@ URL = os.environ["EXPB_URL"].rstrip("/")
 TOKEN = os.environ.get("WISEDO_ADMIN_TOKEN", "").strip()
 argv = sys.argv[1:]
 args = [a for i, a in enumerate(argv) if not a.startswith("--") and not (i > 0 and argv[i - 1] == "--require-providers")]
-TEXT = args[0] if args else (os.environ.get("EXPB_TEXT") or "عاوز لابتوب في حدود ٤٠ الف جنيه يكون gaming لاخويا الصغير")
-EDITS = json.loads(os.environ.get("EXPB_EDITS") or '{"use":["gaming"],"brand":["asus"],"budget":40000,"acceptImports":"no","who":"kid"}')
+TEXT = args[0] if args else (os.environ.get("EXPB_TEXT") or "عاوز لابتوب للبرمجه في حدود ٤٠ الف جنيه")
+EDITS = json.loads(os.environ.get("EXPB_EDITS") or '{"use":["programming"],"budget":40000,"acceptImports":"no"}')
+INSPECT = (os.environ.get("EXPB_INSPECT") or "IdeaPad Slim 3").lower()
 need = 1
 if "--require-providers" in sys.argv:
     need = int(sys.argv[sys.argv.index("--require-providers") + 1])
@@ -145,6 +146,19 @@ for c in run["unverified_candidates"]:
     for pc in (c.get("page_checks") or [])[:3]:
         print(f"      page check {pc.get('status')} HTTP {pc.get('http')} offer {pc.get('offer')} title {str(pc.get('title'))[:70]!r} {pc.get('error') or ''}")
 print("\nexcluded by reason:", json.dumps(run["metrics"].get("excluded_by_reason")))
+m = run["metrics"]
+print("search: by stage", json.dumps(m.get("searches_by_stage")), "| exact", m.get("exact_model_searches"), "| store-specific", m.get("retailer_specific_searches"),
+      "| family", m.get("family_searches"), "| direct URLs found", m.get("direct_urls_found"), "checked", m.get("direct_urls_checked"),
+      "blocked", m.get("direct_urls_blocked"), "page-verified", m.get("direct_urls_page_verified"))
+if INSPECT:
+    print(f"\nINSPECT {INSPECT!r}:")
+    for c in run["candidates"]:
+        if INSPECT not in f"{c['brand']} {c['model']}".lower():
+            continue
+        print("  " + cand_line(c))
+        print(f"      search {json.dumps(c.get('search'))} | links {json.dumps(c.get('link_counts'))}")
+        for l in c.get("links") or []:
+            print(f"      [{l.get('label')}] {l.get('retailer')} {l.get('url')} page {l.get('page_price')} listing {l.get('listing_price')} verified {l.get('verified_price')} {l.get('detail') or ''}")
 print("\nTOP results (existing Recommendation Engine, verified only):")
 if not run["top3"]:
     print("  " + str(run.get("no_verified_message")))

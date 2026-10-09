@@ -19,6 +19,7 @@ import { buildEphemeralSnapshot } from './ephemeral-snapshot.js';
 import { estimateCost, DEFAULT_TIMEOUT_MS } from './providers.js';
 import { SEARCH_PRICES } from './search-providers.js';
 import { parseListing, listingCandidate } from './listings.js';
+import { familyName } from './search-plan.js';
 import { collectOffers, verifyOffers, candidateReport, exclusionCounts } from './offers.js';
 import { match } from '../layer2/index.js';
 
@@ -82,9 +83,20 @@ export function evidenceTargets(products, args, max) {
     }
   } catch { /* fall back to consensus order */ }
   const byKey = new Map(products.map((p) => [p.key, p]));
-  const chosen = order.map((k) => byKey.get(k)).filter(Boolean);
-  for (const p of products) if (!chosen.includes(p)) chosen.push(p);
-  return chosen.filter((p) => p.signature).slice(0, max);
+  const ranked = order.map((k) => byKey.get(k)).filter(Boolean);
+  for (const p of products) if (!ranked.includes(p)) ranked.push(p);
+  // Engine order (fit + claimed price as a search-order hint only), nudged up for an exact MPN and for consensus,
+  // and at most two candidates per product family before the others get a turn (result diversity).
+  const score = (p, i) => i - (p.mpn ? 2 : 0) - ((p.provider_count || 1) > 1 ? 1 : 0);
+  const sorted = ranked.filter((p) => p.signature).map((p, i) => ({ p, s: score(p, i), i })).sort((a, b) => a.s - b.s || a.i - b.i).map((x) => x.p);
+  const fam = new Map();
+  const first = [], rest = [];
+  for (const p of sorted) {
+    const f = familyName(p).toLowerCase();
+    (fam.get(f) || 0) < 2 ? first.push(p) : rest.push(p);
+    fam.set(f, (fam.get(f) || 0) + 1);
+  }
+  return [...first, ...rest].slice(0, max);
 }
 
 async function runEvidence(providers, products, opts, deadlineMs, clock, args) {
@@ -93,10 +105,29 @@ async function runEvidence(providers, products, opts, deadlineMs, clock, args) {
   return Promise.all(providers.filter((p) => typeof p.evidence === 'function' && (opts.providers || ['serper', 'tavily']).includes(p.name)).map(async (p) => {
     const t0 = clock();
     let res;
-    try { res = await withDeadline(p.evidence(top), deadlineMs, `${p.name} evidence`); } catch (e) { res = { ok: false, error: String((e && e.message) || e).slice(0, 200) }; }
+    try { res = await withDeadline(p.evidence(top, { maxQueries: opts.maxQueries, maxPerCandidate: opts.maxPerCandidate }), deadlineMs, `${p.name} evidence`); } catch (e) { res = { ok: false, error: String((e && e.message) || e).slice(0, 200) }; }
     const cost = costOf(p, res && res.usage);
-    return { provider: p.name, phase: 'evidence', ok: !!(res && res.ok), error: res && res.ok ? null : (res && res.error) || 'failed', latency_ms: clock() - t0, usage: (res && res.usage) || null, cost_usd: cost.usd, listings: (res && res.listings) || [], candidates_searched: top.map((c) => c.key) };
+    return { provider: p.name, phase: 'evidence', ok: !!(res && res.ok), error: res && res.ok ? null : (res && res.error) || 'failed', latency_ms: clock() - t0, usage: (res && res.usage) || null, cost_usd: cost.usd, listings: (res && res.listings) || [], candidates_searched: top.map((c) => c.key),
+      search_diagnostics: (res && res.search_diagnostics) || null, by_stage: (res && res.by_stage) || null, warnings: (res && res.warnings) || null };
   }));
+}
+
+/** Run-level search and link counters (report and UI). */
+export function searchMetrics(evidenceRuns, products) {
+  const st = {};
+  for (const r of evidenceRuns) for (const [k, v] of Object.entries(r.by_stage || {})) st[k] = (st[k] || 0) + v;
+  const sum = (k) => products.reduce((n, p) => n + ((p.link_counts && p.link_counts[k]) || 0), 0);
+  return {
+    searches_by_stage: st,
+    exact_model_searches: (st.exact || 0) + (st.tavily_exact || 0),
+    retailer_specific_searches: (st.retailer_model || 0) + (st.retailer_mpn || 0),
+    family_searches: st.family || 0,
+    direct_urls_found: sum('direct_urls_found'),
+    direct_urls_checked: sum('direct_urls_checked'),
+    direct_urls_blocked: sum('direct_urls_blocked'),
+    direct_urls_page_verified: sum('direct_urls_verified'),
+    candidates_with_blocked_exact_url: products.filter((p) => p.status === 'direct_url_found_blocked').length,
+  };
 }
 
 /**
@@ -126,11 +157,25 @@ export async function discoverProducts(args) {
   const tDiscovery = clock();
   const allCandidates = okRuns.flatMap((r) => r.candidates);
   const products = consolidate(allCandidates, okRuns.map((r) => r.provider));
-  const evidenceRuns = args.evidence && args.evidence.enabled === false ? [] : await runEvidence(args.providers, products, args.evidence || {}, Math.min(deadline, 30_000), clock, args);
+  const evidenceRuns = args.evidence && args.evidence.enabled === false ? [] : await runEvidence(args.providers, products, args.evidence || {}, Math.min(deadline, 45_000), clock, args);
   const listings = [...okRuns.flatMap((r) => r.listings), ...evidenceRuns.flatMap((r) => r.listings)];
   const fromEvidence = evidenceCandidates(products, evidenceRuns, new Date(t0).toISOString(), okRuns.map((r) => r.provider));
   products.push(...fromEvidence);
   collectOffers(products, listings);
+  // Per-candidate search diagnostics (queries per stage, stores searched) from every evidence provider.
+  for (const p of products) {
+    const s = { queries: 0, by_stage: {}, retailers_searched: [], providers: [], resolved_at: null };
+    for (const r of evidenceRuns) {
+      const d = r.search_diagnostics && r.search_diagnostics[p.key];
+      if (!d) continue;
+      s.queries += d.queries;
+      for (const [k, v] of Object.entries(d.by_stage || {})) s.by_stage[k] = (s.by_stage[k] || 0) + v;
+      for (const x of d.retailers_searched || []) if (!s.retailers_searched.includes(x)) s.retailers_searched.push(x);
+      s.providers.push(r.provider);
+      s.resolved_at = s.resolved_at || d.resolved_at || null;
+    }
+    p.search = s;
+  }
   const tEvidence = clock();
   const budget = (args.profile.derived && args.profile.derived.maxPrice) || (args.profile.money && args.profile.money.budget) || null;
   const verification = await verifyOffers(products, { fetch: args.fetch, budget, ...(args.verify || {}) });
@@ -164,6 +209,7 @@ export async function discoverProducts(args) {
       urls_checked: verification.checked,
       evidence_candidates: Math.max(0, ...evidenceRuns.map((r) => r.candidates_searched.length)),
       evidence_listing_candidates: fromEvidence.length,
+      ...searchMetrics(evidenceRuns, products),
       evidence_searches: evidenceRuns.reduce((s, r) => s + ((r.usage && r.usage.search_calls) || 0), 0),
       discovery_ms: tDiscovery - t0,
       evidence_ms: tEvidence - tDiscovery,

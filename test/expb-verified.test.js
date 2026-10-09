@@ -386,16 +386,23 @@ test('live regression: "R7 7435HS" / "RyzenTM" / "Ci7" are read as processors, s
 
 test('live regression: prices read from free text never verify; an RTX x070 laptop at 39,900 EGP from a listing is implausible', async () => {
   const cand = { ...F.X, brand: 'Asus', model: 'ROG Strix G16 G614FP', mpn: 'G614FP-GR169W', cpu: 'AMD Ryzen 9 9955HX', ram_gb: 16, storage_gb: 1024, gpu: 'NVIDIA GeForce RTX 5070 8GB', price_egp: 39900, offers: [] };
-  const url = 'https://www.noon.com/egypt-en/asus-g614fp-gr169w-gaming-laptop-ryzen-9-9955hx-rtx-5070-8gb-16gb-ram-1tb-ssd/N70410542V/p/';
+  const url = 'https://btech.com/en/p/asus-rog-strix-g16-g614fp-gr169w-ryzen-9-9955hx-rtx-5070-16gb-1tb';
   const title = 'ASUS G614FP-GR169W Gaming Laptop Ryzen 9 9955HX RTX 5070 8GB 16GB RAM 1TB SSD';
-  const textOnly = await run(cand, [{ provider: 'tavily', kind: 'web', title, url, snippet: 'Now EGP 39,900' }], { [url]: 403 });
+  const page = { [url]: `<title>${title}</title>` };
+  const textOnly = await run(cand, [{ provider: 'tavily', kind: 'web', title, url, snippet: 'Now EGP 39,900' }], page);
   assert.equal(textOnly.p.status, 'discovered_unverified');
   assert.equal(textOnly.p.exclusion_reason, 'no_egyptian_price');
-  const field = await run(cand, [{ provider: 'serper', kind: 'web', title, url, price_text: 'EGP 39,900' }], { [url]: 403 });
+  const field = await run(cand, [{ provider: 'serper', kind: 'web', title, url, price_text: 'EGP 39,900' }], page);
   assert.equal(field.p.exclusion_reason, 'implausible_price');
-  const real = await run(cand, [{ provider: 'serper', kind: 'web', title, url, price_text: 'EGP 104,999' }], { [url]: 403 });
+  const real = await run(cand, [{ provider: 'serper', kind: 'web', title, url, price_text: 'EGP 104,999' }], page);
   assert.equal(real.p.status, 'verified');
   assert.equal(real.p.verified_price, 104999);
+  // the same exact listing on a store that blocks the Worker: kept as a lead, never a verified offer
+  const noon = 'https://www.noon.com/egypt-en/asus-g614fp-gr169w-gaming-laptop-ryzen-9-9955hx-rtx-5070-8gb-16gb-ram-1tb-ssd/N70410542V/p/';
+  const blocked = await run(cand, [{ provider: 'serper', kind: 'web', title, url: noon, price_text: 'EGP 104,999' }], {});
+  assert.equal(blocked.p.status, 'direct_url_found_blocked');
+  assert.equal(blocked.snapshot.products.length, 0);
+  assert.equal(blocked.p.links[0].label, 'exact URL found, page blocked');
 });
 
 test('a listing-only lead without a structured price becomes a candidate, and verifies only with the price on its own product page', async () => {
@@ -415,8 +422,9 @@ test('a listing-only lead without a structured price becomes a candidate, and ve
   const blocked = [...evidenceCandidates([], [{ listings: [lead] }], F.NOW, ['serper'])];
   collectOffers(blocked, [lead]);
   await verifyOffers(blocked, { fetch: F.fakeFetch({}, { [url]: 403 }) });
-  assert.equal(blocked[0].status, 'discovered_unverified');
-  assert.equal(blocked[0].exclusion_reason, 'no_egyptian_price');
+  assert.equal(blocked[0].status, 'direct_url_found_blocked', 'an exact URL is kept even when its page cannot be fetched');
+  assert.equal(blocked[0].exclusion_reason, 'direct_url_found_blocked');
+  assert.equal(blocked[0].links[0].url, url);
 });
 
 test('live regression: a candidate made from an evidence listing keeps its own URL as an offer lead (searched for another candidate)', async () => {
@@ -479,17 +487,22 @@ test('live regression: a product URL that now lands on a search-results page is 
   assert.equal(p.exclusion_reason, 'unreachable');
 });
 
-test('Serper evidence: one family query per product family (what is on sale now), then exact queries, capped for the subrequest budget', async () => {
+test('Serper evidence: staged exact search, batched in one request per stage; family queries only as a last resort', async () => {
   const { createSerperProvider } = await import('../src/sourcing/search-providers.js');
   const f = F.fakeFetch({ serper_search: () => new Response(JSON.stringify({ organic: [] }), { status: 200 }) });
   const s = createSerperProvider({ apiKey: 'k', fetch: f });
-  const cands = [{ key: 'c1', brand: 'Asus', model: 'TUF Gaming A15 (FA506II)' }, { key: 'c2', brand: 'Asus', model: 'TUF Gaming A15 FA506IC' }, { key: 'c3', brand: 'Asus', model: 'ROG Strix G15 G513QC' }];
-  const r = await s.evidence(cands, { maxQueries: 4 });
-  const qs = f.calls.map((c) => c.body.q);
-  assert.equal(qs.length, 4);
-  assert.match(qs[0], /^Asus TUF Gaming A15 laptop price EGP \(site:btech\.com/);
-  assert.match(qs[1], /^Asus ROG Strix G15 laptop price EGP/);
-  assert.equal(r.usage.search_calls, 4);
+  const cands = [{ key: 'c1', brand: 'Asus', model: 'TUF Gaming A15 (FA506II)', mpn: 'FA506II-HN149T' }, { key: 'c2', brand: 'Asus', model: 'ROG Strix G15 G513QC' }];
+  const r = await s.evidence(cands, { maxQueries: 100 });
+  assert.equal(f.calls.length, 4, 'one HTTP request per stage (exact, retailer model, retailer MPN, family)');
+  assert.ok(f.calls.every((c) => Array.isArray(c.body)));
+  const qs = f.calls.flatMap((c) => c.body.map((b) => b.q));
+  assert.equal(qs[0], '"FA506II-HN149T" Egypt');
+  assert.ok(qs.includes('"Asus TUF Gaming A15 FA506II" site:cairosales.com'));
+  assert.ok(qs.includes('"FA506II-HN149T" site:dream2000.com'));
+  assert.ok(qs.indexOf('Asus TUF Gaming A15 laptop price EGP (site:amazon.eg OR site:noon.com/egypt-en OR site:btech.com OR site:cairosales.com OR site:dream2000.com OR site:2b.com.eg OR site:rayashop.com OR site:compumarts.com)') > qs.indexOf('"FA506II-HN149T" site:compumarts.com'));
+  assert.equal(r.usage.search_calls, qs.length);
+  const capped = await createSerperProvider({ apiKey: 'k', fetch: F.fakeFetch({ serper_search: () => new Response(JSON.stringify({ organic: [] }), { status: 200 }) }) }).evidence(cands, { maxQueries: 5 });
+  assert.equal(capped.usage.search_calls, 5, 'the query budget is a hard cap');
 });
 
 test('page checks go first to products that can fit the budget (an RTX x070 laptop cannot be 40,000 EGP)', async () => {
@@ -503,4 +516,78 @@ test('page checks go first to products that can fit the budget (an RTX x070 lapt
   const f = F.fakeFetch({}, pages);
   await verifyOffers(products, { fetch: f, maxUrls: 1, budget: 40000 });
   assert.deepEqual(f.calls.map((c) => c.url), ['https://btech.com/en/p/asus-tuf-gaming-a15-fa506ncr-ryzen-7-7435hs-rtx-3050']);
+});
+
+// --- live search strategy: exact model / MPN / retailer searches (regression: IdeaPad Slim 3 15IAH8, 83ER00ABED) ----
+
+test('regression: Lenovo IdeaPad Slim 3 15IAH8 (83ER00ABED) is searched by MPN, model and store, past category-only results; blocked exact URLs survive', async () => {
+  const { createSerperProvider } = await import('../src/sourcing/search-providers.js');
+  const cand = { ...F.X, mpn: '83ER00ABED', offers: [] };
+  const products = consolidate([norm(cand, 'gemini')], ['gemini']);
+  const title = 'Lenovo IdeaPad Slim 3 15IAH8 83ER00ABED Laptop - Intel Core i5-12450H, 16GB RAM, 512GB SSD, 15.6" FHD';
+  const URLS = {
+    amazon: 'https://www.amazon.eg/-/en/Lenovo-IdeaPad-15IAH8-i5-12450H-83ER00ABED/dp/B0CQ8B1J4K',
+    btech: 'https://btech.com/en/p/lenovo-ideapad-slim-3-15iah8-83er00abed-core-i5-12450h-16gb-512gb',
+    cairosales: 'https://cairosales.com/en/products/lenovo-ideapad-slim-3-15iah8-83er00abed-i5-12450h-16gb-512gb',
+    dream2000: 'https://dream2000.com/en/lenovo-ideapad-slim-3-15iah8-83er00abed-core-i5-12450h-16gb-512gb.html',
+  };
+  const category = [
+    { title: 'Lenovo Laptops | B.TECH Egypt', link: 'https://btech.com/en/laptops/c/lenovo' },
+    { title: 'lenovo ideapad slim 3 - Amazon.eg', link: 'https://www.amazon.eg/s?k=lenovo+ideapad+slim+3' },
+  ];
+  // Google-like answers: the generic and exact queries only return category / search pages; store-specific queries
+  // return the real product pages.
+  const answer = (q) => {
+    const site = (q.match(/site:([^\s)]+)/) || [])[1];
+    if (/^"83ER00ABED" Egypt$|Egypt$/.test(q) && !site) return category;
+    if (site === 'amazon.eg') return [{ title, link: URLS.amazon }];
+    if (site === 'btech.com') return [{ title, link: URLS.btech }];
+    if (site === 'cairosales.com') return [{ title, link: URLS.cairosales }];
+    if (site === 'dream2000.com') return [{ title, link: URLS.dream2000 }];
+    return [];
+  };
+  const f = F.fakeFetch({ serper_search: (b) => new Response(JSON.stringify({ organic: answer(b.q) }), { status: 200 }) });
+  const r = await createSerperProvider({ apiKey: 'k', fetch: f }).evidence(products, { maxQueries: 60, uncheckable: [] });
+  const qs = f.calls.flatMap((c) => c.body.map((b) => b.q));
+  assert.ok(qs.includes('"83ER00ABED" Egypt'), 'MPN-only search');
+  assert.ok(qs.includes('Lenovo IdeaPad Slim 3 15IAH8 83ER00ABED Egypt'), 'model + MPN');
+  assert.ok(qs.includes('Lenovo IdeaPad Slim 3 15IAH8 Egypt'), 'exact model');
+  assert.ok(qs.some((q) => /^Lenovo IdeaPad Slim 3 15IAH8 i5-12450H 16GB 512GB Egypt$/.test(q)), 'model + core specs');
+  for (const site of ['amazon.eg', 'noon.com/egypt-en', 'btech.com', 'cairosales.com', 'dream2000.com', '2b.com.eg', 'rayashop.com', 'compumarts.com']) {
+    assert.ok(qs.includes(`"Lenovo IdeaPad Slim 3 15IAH8" site:${site}`), `store search ${site}`);
+  }
+  assert.ok(r.search_diagnostics[products[0].key].resolved_at === 'retailer_model', 'category-only results did not end the search; store searches resolved it');
+
+  // Pages: B.TECH answers with its product JSON-LD; Amazon and Cairo Sales block the Worker; Dream 2000 shows no price.
+  const pages = {
+    [URLS.btech]: `<title>${title}</title><script type="application/ld+json">{"@type":"Product","offers":{"@type":"Offer","price":"31999","priceCurrency":"EGP","availability":"https://schema.org/InStock"}}</script>`,
+    [URLS.amazon]: 403,
+    [URLS.cairosales]: 403,
+    [URLS.dream2000]: `<title>${title}</title>`,
+  };
+  collectOffers(products, r.listings);
+  await verifyOffers(products, { fetch: F.fakeFetch({}, pages) });
+  const p = products[0];
+  const by = Object.fromEntries(p.links.map((l) => [l.url, l]));
+  for (const u of Object.values(URLS)) assert.ok(by[u], `${u} kept in the candidate's links`);
+  assert.equal(by[URLS.btech].status, 'live_verified');
+  assert.equal(by[URLS.btech].label, 'verified');
+  assert.equal(by[URLS.amazon].label, 'exact URL found, page blocked');
+  assert.equal(by[URLS.cairosales].status, 'blocked');
+  assert.equal(by[URLS.dream2000].label, 'exact match, price unverified');
+  assert.equal(p.status, 'verified');
+  assert.equal(p.verified_offers.length, 1, 'only the page-verified B.TECH offer is an offer');
+  assert.equal(p.verified_product_url, URLS.btech);
+  assert.equal(p.verified_price, 31999);
+  assert.deepEqual(p.link_counts, { direct_urls_found: 4, direct_urls_checked: 2, direct_urls_blocked: 2, direct_urls_verified: 1 });
+});
+
+test('blocked exact URLs only: the candidate is "direct_url_found_blocked", shown with its links, never ranked', async () => {
+  const url = 'https://www.amazon.eg/-/en/Lenovo-IdeaPad-15IAH8-i5-12450H-83ER00ABED/dp/B0CQ8B1J4K';
+  const { p, snapshot, unrankable } = await run({ ...NO_URL, mpn: '83ER00ABED' }, [listing(`${IDEAPAD_TITLE} 83ER00ABED`, url, 'EGP 31,999.00', 'Amazon.eg')], { [url]: 403 });
+  assert.equal(p.status, 'direct_url_found_blocked');
+  assert.equal(p.exclusion_reason, 'direct_url_found_blocked');
+  assert.equal(snapshot.products.length, 0);
+  assert.equal(unrankable[0].reason, 'direct_url_found_blocked');
+  assert.equal(candidateReport(p).links[0].url, url);
 });

@@ -48,6 +48,7 @@ function verifiedFields(meta) {
     verified_price: meta ? meta.verified_price ?? null : null,
     verified_retailer: meta ? meta.verified_retailer || null : null,
     verified_product_url: meta ? meta.verified_product_url || null : null,
+    links: meta ? meta.links || [] : [],
     ...(meta ? { discovery: meta } : {}),
   };
 }
@@ -129,8 +130,8 @@ async function runHandler(env, request, h) {
 
   const llmSource = new LLMProductDiscoverySource({
     providers: available, missing, configs: CONFIGS, requestId,
-    verify: { enabled: String(env.DISCOVERY_VERIFY || '1') !== '0', maxUrls: Number(env.DISCOVERY_VERIFY_MAX_URLS) || 20, timeoutMs: Number(env.DISCOVERY_VERIFY_TIMEOUT_MS) || 6000 },
-    evidence: { enabled: String(env.DISCOVERY_EVIDENCE || '1') !== '0', maxCandidates: Number(env.DISCOVERY_EVIDENCE_MAX) || 10, providers: String(env.DISCOVERY_EVIDENCE_PROVIDERS || 'serper,tavily').split(',').map((x) => x.trim()) },
+    verify: { enabled: String(env.DISCOVERY_VERIFY || '1') !== '0', maxUrls: Number(env.DISCOVERY_VERIFY_MAX_URLS) || 24, timeoutMs: Number(env.DISCOVERY_VERIFY_TIMEOUT_MS) || 6000 },
+    evidence: { enabled: String(env.DISCOVERY_EVIDENCE || '1') !== '0', maxCandidates: Number(env.DISCOVERY_EVIDENCE_MAX) || 12, maxQueries: Number(env.DISCOVERY_SEARCH_MAX_QUERIES) || 60, maxPerCandidate: Number(env.DISCOVERY_SEARCH_MAX_PER_CANDIDATE) || 20, providers: String(env.DISCOVERY_EVIDENCE_PROVIDERS || 'serper,tavily').split(',').map((x) => x.trim()) },
   });
   const [llm, cat] = await Promise.all([
     recommendWith(llmSource, profile, now),

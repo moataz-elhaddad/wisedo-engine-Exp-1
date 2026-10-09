@@ -103,7 +103,18 @@ export function fakeFetch(routes = {}, pages = {}) {
       const r = routes[which];
       if (r === undefined) return jsonRes(500, { error: { message: 'no route' } });
       if (r === 'timeout') return new Promise((_, rej) => { if (init.signal) init.signal.addEventListener('abort', () => rej(Object.assign(new Error('aborted'), { name: 'AbortError' }))); });
-      if (typeof r === 'function') return r(init.body ? JSON.parse(init.body) : null, calls);
+      const body = init.body ? JSON.parse(init.body) : null;
+      // Serper batch: an array of queries in, an array of result objects out (each element answered like a single query).
+      if (which === 'serper_search' && Array.isArray(body)) {
+        const each = await Promise.all(body.map(async (q) => {
+          const res = typeof r === 'function' ? await r(q, calls) : jsonRes(200, r);
+          if (!res.ok) return { status: res.status };
+          return res.json();
+        }));
+        const bad = each.find((x) => x && x.status && !x.organic);
+        return bad ? jsonRes(bad.status, { message: 'error' }) : jsonRes(200, each);
+      }
+      if (typeof r === 'function') return r(body, calls);
       return jsonRes(200, r);
     }
     const p = pages[u];

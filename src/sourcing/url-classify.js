@@ -25,6 +25,7 @@ export const EGYPT_RETAILERS = [
   { host: 'select.com.eg', name: 'Select', product: 'slug' },
   { host: 'tradeline-stores.com', name: 'Tradeline', product: 'slug' },
   { host: 'cairosales.com', name: 'Cairo Sales', product: 'slug' },
+  { host: 'dream2000.com', name: 'Dream 2000', product: 'slug' },
   { host: 'carrefouregypt.com', name: 'Carrefour Egypt', product: /\/p\/\d+/ },
   { host: 'egypt.sharafdg.com', name: 'Sharaf DG Egypt', product: 'slug' },
   { host: 'egyptlaptop.com', name: 'Egypt Laptop', product: 'slug' },

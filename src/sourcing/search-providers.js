@@ -8,6 +8,7 @@
 // facts. They never invent anything: a listing is exactly what the search API returned.
 import { postJson, ProviderError } from './http.js';
 import { EGYPT_HOSTS } from './listings.js';
+import { resolveCandidates, familyName, modelName, PRIORITY_RETAILERS } from './search-plan.js';
 
 export const SEARCH_PRICES = {
   tavily: { per_call: 0.008, basis: 'Tavily pay-as-you-go $0.008/credit; free plan 1,000 credits/month' },
@@ -15,9 +16,9 @@ export const SEARCH_PRICES = {
 };
 
 /** Egyptian storefronts searched for exact products (Google site: operators; noon only on its Egypt path). */
-export const EGYPT_SITE_FILTERS = ['btech.com', '2b.com.eg', 'amazon.eg', 'noon.com/egypt-en', 'compumarts.com', 'rayashop.com', 'jumia.com.eg'];
+export const EGYPT_SITE_FILTERS = ['btech.com', '2b.com.eg', 'amazon.eg', 'noon.com/egypt-en', 'compumarts.com', 'rayashop.com', 'cairosales.com', 'dream2000.com', 'jumia.com.eg'];
 /** Hosts for Tavily's include_domains (no paths). */
-export const EGYPT_DOMAINS = ['btech.com', '2b.com.eg', 'amazon.eg', 'noon.com', 'compumarts.com', 'rayashop.com', 'jumia.com.eg', 'dubaiphone.net', 'elbadrgroupeg.store', 'sigma-computer.com'];
+export const EGYPT_DOMAINS = ['btech.com', '2b.com.eg', 'amazon.eg', 'noon.com', 'compumarts.com', 'rayashop.com', 'cairosales.com', 'dream2000.com', 'jumia.com.eg', 'dubaiphone.net', 'elbadrgroupeg.store', 'sigma-computer.com'];
 
 /** Short spec string for a candidate query: "Lenovo IdeaPad Slim 3 15IAH8 i5-12450H 16GB 512GB". */
 export function candidateQuery(c) {
@@ -29,14 +30,7 @@ export function candidateQuery(c) {
  * Exact-product queries in Egypt for one candidate: brand + model + MPN, restricted to Egyptian storefronts, plus an
  * "Egypt EGP price" query. The exact model / MPN search is the main verification path (offers.js).
  */
-/**
- * The product family without configuration codes: "TUF Gaming A15 (FA506II)" -> "TUF Gaming A15". Searching the
- * family on Egyptian stores surfaces the variants actually on sale (LLMs often name older configurations).
- */
-export function familyName(c) {
-  const m = String(c.model || '').replace(/\([^)]*\)/g, ' ').split(/\s+/).filter((w) => w && !/^[A-Z]{1,3}\d{3,}[A-Z0-9-]*$/i.test(w) && !/^\d{4}$/.test(w)).slice(0, 4).join(' ');
-  return `${c.brand || ''} ${m}`.replace(/\s+/g, ' ').trim();
-}
+export { familyName, modelName };
 
 export function exactQueries(c) {
   const name = [c.brand, c.model].filter(Boolean).join(' ');
@@ -71,10 +65,13 @@ export function createTavilyProvider(opts) {
       return { ok: true, listings, usage: { search_calls: 1, credits }, model: `tavily-search:${depth}` };
     },
     async evidence(allCands) {
-      // Tavily credits cost ~8x Serper's: only the first candidates (engine order) get a Tavily search.
+      // Tavily credits cost ~8x Serper's: only the first candidates (engine order) get a Tavily search, an exact
+      // model (+ MPN) query restricted to Egyptian store domains.
       const cands = allCands.slice(0, opts.maxEvidence ?? 5);
-      const all = (await Promise.all(cands.map(async (c) => (await call(exactQueries(c).price, { max_results: 6, include_domains: EGYPT_DOMAINS })).map((l) => ({ ...l, for_key: c.key }))))).flat();
-      return { ok: true, listings: all, usage: { search_calls: cands.length, credits: cands.length * credits } };
+      const all = (await Promise.all(cands.map(async (c) => (await call(`${modelName(c)} ${c.mpn || ''} price Egypt`.replace(/\s+/g, ' ').trim(), { max_results: 8, include_domains: EGYPT_DOMAINS }))
+        .map((l) => ({ ...l, for_key: c.key, search_kind: 'tavily_exact' }))))).flat();
+      const search_diagnostics = Object.fromEntries(cands.map((c) => [c.key, { queries: 1, by_stage: { tavily_exact: 1 }, retailers_searched: [], direct_urls_found: 0 }]));
+      return { ok: true, listings: all, search_diagnostics, by_stage: { tavily_exact: cands.length }, usage: { search_calls: cands.length, credits: cands.length * credits } };
     },
   };
 }
@@ -100,6 +97,30 @@ export function createSerperProvider(opts) {
       price_text: r.price != null ? `${r.currency || ''} ${r.price}` : '',
     }));
   };
+  const organic = (d) => (Array.isArray(d && d.organic) ? d.organic : []).map((r) => ({
+    provider: 'serper', kind: 'web', title: String(r.title || ''), url: String(r.link || ''),
+    snippet: [r.snippet, r.price != null ? `price ${r.currency || ''} ${r.price}` : '', r.attributes ? Object.entries(r.attributes).map(([k, v]) => `${k}: ${v}`).join(' ') : ''].filter(Boolean).join(' ').slice(0, 600),
+    price_text: r.price != null ? `${r.currency || ''} ${r.price}` : '',
+  }));
+  /**
+   * Many queries in one HTTP request (Serper batch: a JSON array body, one result object per query). One request per
+   * stage keeps a run under the Worker's subrequest limit; credits are still one per query.
+   */
+  const searchBatch = async (queries) => {
+    const out = [];
+    for (let i = 0; i < queries.length; i += 50) {
+      const chunk = queries.slice(i, i + 50);
+      let d;
+      try { d = await postJson(doFetch, 'https://google.serper.dev/search', headers, chunk.map((q) => ({ q, gl: 'eg', hl: 'en', num: 10 })), timeoutMs, 'serper'); } catch (e) { d = { batch_error: e }; }
+      if (Array.isArray(d)) { out.push(...chunk.map((_, k) => organic(d[k]))); continue; }
+      if (chunk.length === 1 && !d.batch_error) { out.push(organic(d)); continue; }
+      // Batch refused: the first 20 queries one by one (subrequest budget), the rest stay unsearched.
+      if (d.batch_error && /HTTP 40[13]/.test(String(d.batch_error.message))) throw d.batch_error;
+      const single = await Promise.all(chunk.map((q, k) => (k < 20 ? search(q, 10).catch(() => []) : Promise.resolve([]))));
+      out.push(...single);
+    }
+    return out;
+  };
   return {
     name: 'serper', role: 'shopping', model: 'serper:google-shopping+search',
     async discover(request) {
@@ -116,21 +137,14 @@ export function createSerperProvider(opts) {
       const errors = all.filter((x) => x.status === 'rejected').map((x) => String(x.reason && x.reason.message).slice(0, 160));
       return { ok: true, listings, usage: { search_calls: 3, credits: 3 }, model: 'serper:google-shopping+search', ...(errors.length ? { warnings: errors } : {}) };
     },
+    /**
+     * Exact product-page resolution (search-plan.js): staged exact / retailer / MPN / family queries per candidate,
+     * later stages only for candidates not yet resolved, at most `maxQueries` queries per run.
+     */
     async evidence(cands, opts2 = {}) {
-      // Workers allow ~50 subrequests per run (discovery + evidence + page checks): at most `max` queries here.
-      // Family queries first (one per product family, they find what is on sale now), then exact queries.
-      const max = opts2.maxQueries ?? 10;
-      const sites = EGYPT_SITE_FILTERS.map((x) => `site:${x}`).join(' OR ');
-      const jobs = [];
-      const fams = new Set();
-      for (const c of cands) {
-        const f = familyName(c);
-        if (f.split(' ').length >= 2 && !fams.has(f.toLowerCase())) { fams.add(f.toLowerCase()); jobs.push({ q: `${f} laptop price EGP (${sites})`, key: c.key, family: f }); }
-      }
-      for (const c of cands) jobs.push({ q: exactQueries(c).sites, key: c.key });
-      const run = jobs.slice(0, max);
-      const all = (await Promise.all(run.map((j) => search(j.q, 10).then((ls) => ls.map((l) => (j.family ? { ...l, family_search: j.family } : { ...l, for_key: j.key })))))).flat();
-      return { ok: true, listings: all, usage: { search_calls: run.length, credits: run.length } };
+      const r = await resolveCandidates(cands, searchBatch, { maxQueries: opts2.maxQueries ?? opts.maxQueries ?? 60, maxPerCandidate: opts2.maxPerCandidate ?? opts.maxPerCandidate ?? 20, uncheckable: opts2.uncheckable || ['noon.com', 'jumia.com.eg'], retailers: PRIORITY_RETAILERS });
+      if (r.queries && r.errors.length >= Object.keys(r.by_stage).length && !r.listings.length) return { ok: false, error: r.errors.join('; ') };
+      return { ok: true, listings: r.listings, search_diagnostics: r.diagnostics, by_stage: r.by_stage, usage: { search_calls: r.queries, credits: r.queries }, ...(r.errors.length ? { warnings: r.errors } : {}) };
     },
   };
 }
