@@ -12,7 +12,7 @@
 // Category pages, search pages and family-only matches do not resolve a candidate, so the search goes on.
 // Nothing here verifies an offer: the URLs found are leads for offers.js (page check, EGP price, variant, stock).
 import { parseListing, listingMatches } from './listings.js';
-import { classifyUrl } from './url-classify.js';
+import { classifyUrl, canonicalUrl } from './url-classify.js';
 
 /** Common Egyptian sources, searched one by one (other Egyptian stores found by search are still accepted). */
 export const PRIORITY_RETAILERS = [
@@ -45,7 +45,7 @@ export function modelName(c) {
 
 /** The family without configuration codes: "TUF Gaming A15 (FA506II)" -> "Asus TUF Gaming A15". */
 export function familyName(c) {
-  const m = clean(c.model).split(/\s+/).filter((w) => w && !/^[A-Z]{1,3}\d{3,}[A-Z0-9-]*$/i.test(w) && !/^\d{4}$/.test(w) && !/^\d{2}[A-Z]{3}\d$/i.test(w)).slice(0, 4).join(' ');
+  const m = clean(c.model).split(/\s+/).filter((w) => w && !/^[A-Z]{1,3}\d{3,}[A-Z0-9-]*$/i.test(w) && !/^\d{4}$/.test(w) && !/^\d{2}[A-Z]{3}\d$/i.test(w) && !/^(?=.*\d)(?=.*[A-Z])[A-Z0-9-]{8,}$/i.test(w)).slice(0, 4).join(' ');
   return `${clean(c.brand)} ${m.replace(new RegExp(`^${clean(c.brand)}\\s+`, 'i'), '')}`.replace(/\s+/g, ' ').trim();
 }
 
@@ -101,15 +101,16 @@ export async function resolveCandidates(cands, searchBatch, opts = {}) {
   const done = new Set();
   const seenUrl = new Map(cands.map((c) => [c.key, new Set()]));
   const exact = new Map(cands.map((c) => [c.key, []]));
-  // Resolved = an exact page on a store the Worker can check, or two exact pages: a single Noon link (always blocked
-  // for page checks) does not end the search.
+  // Resolved = exact pages on three stores, or on two stores of which one the Worker can check. One exact page is
+  // not enough (live: a single Vodafone eShop hit ended the search and the store searches never ran; it then blocked).
   const settle = (c, url, stage) => {
-    if (done.has(c.key) || exact.get(c.key).includes(url)) return;
-    exact.get(c.key).push(url);
+    if (done.has(c.key) || exact.get(c.key).some((x) => x.url === url)) return;
     const h = classifyUrl(url).host || '';
-    const checkable = !(opts.uncheckable || []).some((x) => h === x || h.endsWith('.' + x));
+    exact.get(c.key).push({ url, host: h, checkable: !(opts.uncheckable || []).some((x) => h === x || h.endsWith('.' + x)) });
+    const stores = new Set(exact.get(c.key).map((x) => x.host));
     diag[c.key].exact_urls_found = exact.get(c.key).length;
-    if (checkable || exact.get(c.key).length >= 2) { done.add(c.key); diag[c.key].resolved_at = stage; }
+    diag[c.key].exact_stores = [...stores];
+    if (stores.size >= 3 || (stores.size >= 2 && exact.get(c.key).some((x) => x.checkable))) { done.add(c.key); diag[c.key].resolved_at = stage; }
   };
   for (const stage of STAGES) {
     // Round-robin across the still-unresolved candidates so a few candidates cannot take the whole budget.
@@ -131,7 +132,8 @@ export async function resolveCandidates(cands, searchBatch, opts = {}) {
       d.by_stage[stage] = (d.by_stage[stage] || 0) + 1;
       byStage[stage] = (byStage[stage] || 0) + 1;
       if (j.retailer && !d.retailers_searched.includes(j.retailer)) d.retailers_searched.push(j.retailer);
-      for (const l of results[i] || []) {
+      for (const raw of results[i] || []) {
+        const l = { ...raw, url: canonicalUrl(raw.url) };
         // Family results are shared (any candidate may match them); exact results belong to their candidate.
         listings.push(stage === 'family' ? { ...l, family_search: j.q, search_kind: j.kind } : { ...l, for_key: j.c.key, search_kind: j.kind, search_query: j.q });
         const cls = classifyUrl(l.url);

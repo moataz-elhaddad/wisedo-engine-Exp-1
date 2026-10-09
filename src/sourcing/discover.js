@@ -14,11 +14,11 @@
 // One failed provider never fails the request; zero usable providers returns ok:false with every reason.
 import { buildDiscoveryRequest } from './discovery-prompt.js';
 import { normalizeProviderOutput } from './normalize.js';
-import { consolidate, sameProduct } from './consolidate.js';
+import { consolidate, sameProduct, cpuToken } from './consolidate.js';
 import { buildEphemeralSnapshot } from './ephemeral-snapshot.js';
 import { estimateCost, DEFAULT_TIMEOUT_MS } from './providers.js';
 import { SEARCH_PRICES } from './search-providers.js';
-import { parseListing, listingCandidate } from './listings.js';
+import { parseListing, listingCandidate, listingMatches } from './listings.js';
 import { familyName } from './search-plan.js';
 import { collectOffers, verifyOffers, candidateReport, exclusionCounts } from './offers.js';
 import { match } from '../layer2/index.js';
@@ -135,10 +135,32 @@ export function searchMetrics(evidenceRuns, products) {
  * configurations (the variant actually on sale). A full configuration on an Egyptian product page with an EGP price
  * becomes a candidate of its own (unless it is already one); it still has to pass the same offer verification.
  */
-export function evidenceCandidates(products, evidenceRuns, nowIso, providersAsked, max = 12) {
-  const cands = evidenceRuns.flatMap((r) => r.listings).map((l) => listingCandidate(parseListing(l), nowIso)).filter(Boolean)
-    .filter((c) => !products.some((p) => sameProduct(p, c).same));
-  return consolidate(cands, providersAsked).slice(0, max).map((p, i) => ({ ...p, key: `e${i + 1}`, found_via: 'evidence_search' }));
+export function evidenceCandidates(products, evidenceRuns, nowIso, providersAsked, max = 20) {
+  const withMpn = products.filter((p) => p.mpn);
+  const cands = evidenceRuns.flatMap((r) => r.listings).map((l) => {
+    const pl = parseListing(l);
+    const c = listingCandidate(pl, nowIso);
+    if (!c) return null;
+    // The listing's own part number when it is a sibling of a candidate's MPN ("mpn differs (83er00beed)"), so the
+    // store's SKU becomes its own candidate instead of being folded into the LLM's.
+    for (const p of withMpn) {
+      const m = /mpn differs \(([a-z0-9]+)\)/.exec(listingMatches(p, pl).why || '');
+      if (m) { c.mpn = m[1].toUpperCase(); break; }
+    }
+    return c;
+  }).filter(Boolean).filter((c) => !products.some((p) => sameProduct(p, c).same));
+  // Store listings of the same model as a discovered candidate come first (often the real SKU on sale when the LLM's
+  // MPN exists nowhere: live, "83ER00ABED" vs the stores' 83ER00BEED with the same CPU / RAM / storage).
+  const fams = new Map(products.map((p) => [familyName(p).toLowerCase(), p]));
+  const rel = (c) => {
+    const twin = products.find((p) => familyName(p).toLowerCase() === familyName(c).toLowerCase() && p.ram_gb === c.ram_gb && p.storage_gb === c.storage_gb && cpuToken(p.cpu) && cpuToken(p.cpu) === cpuToken(c.cpu));
+    return twin ? 0 : fams.has(familyName(c).toLowerCase()) ? 1 : 2;
+  };
+  const merged = consolidate(cands, providersAsked).map((p, i) => ({ p, w: rel(p), i })).sort((a, b) => a.w - b.w || a.i - b.i).slice(0, max);
+  return merged.map(({ p }, i) => {
+    const twin = products.find((q) => familyName(q).toLowerCase() === familyName(p).toLowerCase() && q.ram_gb === p.ram_gb && q.storage_gb === p.storage_gb && cpuToken(q.cpu) && cpuToken(q.cpu) === cpuToken(p.cpu));
+    return { ...p, key: `e${i + 1}`, found_via: 'evidence_search', ...(twin ? { same_specs_as: twin.key, same_specs_note: `same model and specs as ${twin.brand} ${twin.model}${twin.mpn ? ` (${twin.mpn})` : ''}; stores list ${p.mpn || 'another part number'} — kept as a separate variant` } : {}) };
+  });
 }
 
 /**

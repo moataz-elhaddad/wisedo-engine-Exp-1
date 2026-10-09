@@ -591,3 +591,23 @@ test('blocked exact URLs only: the candidate is "direct_url_found_blocked", show
   assert.equal(unrankable[0].reason, 'direct_url_found_blocked');
   assert.equal(candidateReport(p).links[0].url, url);
 });
+
+test('live regression: the LLM MPN (83ER00ABED) exists nowhere, stores list 83ER00BEED with the same specs: that SKU becomes its own candidate, kept separate', async () => {
+  const { evidenceCandidates } = await import('../src/sourcing/discover.js');
+  const products = consolidate([norm({ ...F.X, mpn: '83ER00ABED', offers: [] }, 'gemini')], ['gemini']);
+  const btech = 'https://btech.com/en/p/lenovo-ideapadslim3-15iah8-83er00beed-laptop-i5-12450h-512gb-ssd-16gb-15-6-inteluhd-w11-grey';
+  const lead = { provider: 'serper', kind: 'web', for_key: products[0].key, title: 'Lenovo IdeaPad Slim 3 15IAH8 83ER00BEED Laptop i5-12450H 512GB SSD 16GB 15.6" W11', url: `${btech}?srsltid=AbC123` };
+  const extra = evidenceCandidates(products, [{ listings: [lead] }], F.NOW, ['gemini', 'serper']);
+  assert.equal(extra.length, 1);
+  assert.equal(extra[0].mpn, '83ER00BEED');
+  assert.equal(extra[0].same_specs_as, products[0].key);
+  assert.match(extra[0].same_specs_note, /83ER00ABED.*83ER00BEED/);
+  products.push(...extra);
+  collectOffers(products, [lead]);
+  const page = '<title>Lenovo IdeaPad Slim 3 15IAH8 83ER00BEED i5-12450H 16GB 512GB</title><script type="application/ld+json">{"@type":"Product","offers":{"price":"32999","priceCurrency":"EGP","availability":"InStock"}}</script>';
+  await verifyOffers(products, { fetch: F.fakeFetch({}, { [btech]: page }) });
+  assert.equal(products[0].status, 'discovered_unverified', 'the LLM SKU is not verified by another SKU');
+  assert.equal(products[0].links.find((l) => l.url === btech).status, 'variant_mismatch');
+  assert.equal(products[1].status, 'verified');
+  assert.equal(products[1].verified_product_url, btech, 'tracking parameters dropped');
+});

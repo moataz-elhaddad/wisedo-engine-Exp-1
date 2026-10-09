@@ -78,7 +78,12 @@ function ramOf(t) {
   let m = t.match(/(\d{1,2})\s*gb\s*(?:of\s*)?(?:ram|ddr\d?x?|lpddr\d?x?|memory|unified|رام|رامات)/) || t.match(/(?:ram|رام|رامات|memory)\s*:?\s*(\d{1,2})\s*gb/);
   if (m) return Number(m[1]);
   m = t.match(/\b(\d{1,2})\s*gb\s*[/|,]?\s*(\d{3,4}\s*gb|\d\s*tb)/);
-  return m ? Number(m[1]) : null;
+  if (m) return Number(m[1]);
+  // Store titles like "512GB SSD 16GB": a lone laptop-RAM size that is not graphics memory ("RTX 3050 4GB", "6GB GDDR6").
+  for (const x of t.matchAll(/\b(8|12|16|24|32|64)\s*gb\b(?!\s*(?:gddr|vram|graphics|video|dedicated))/g)) {
+    if (!/(rtx|gtx|rx|arc|graphics|vga|geforce|radeon)[^,|]{0,14}$/.test(t.slice(Math.max(0, x.index - 24), x.index))) return Number(x[1]);
+  }
+  return null;
 }
 
 /** Storage GB: "512GB SSD", "1TB NVMe", "SSD 512GB", "16GB/512GB". */

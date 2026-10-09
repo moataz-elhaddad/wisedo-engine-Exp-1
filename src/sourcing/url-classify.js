@@ -114,6 +114,16 @@ export function classifyUrl(url) {
   return res(looksLikeProductSlug(lp) ? 'direct_product' : 'unknown', egypt, country, retailer);
 }
 
+/** The same page without tracking parameters (Google's srsltid, utm_*, gclid...), for de-duplication and display. */
+export function canonicalUrl(url) {
+  try {
+    const u = new URL(url);
+    for (const k of [...u.searchParams.keys()]) if (/^(srsltid|utm_\w+|gclid|gbraid|wbraid|fbclid|ref|ref_|tag|psc|th)$/i.test(k)) u.searchParams.delete(k);
+    u.hash = '';
+    return u.toString();
+  } catch { return url; }
+}
+
 /** A URL that can carry a verified Egyptian retail offer. */
 export function isEgyptianProductPage(url) {
   const c = classifyUrl(url);

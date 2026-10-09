@@ -157,6 +157,8 @@ if INSPECT:
             continue
         print("  " + cand_line(c))
         print(f"      search {json.dumps(c.get('search'))} | links {json.dumps(c.get('link_counts'))}")
+        if c.get("same_specs_note"):
+            print(f"      note: {c['same_specs_note']}")
         for l in c.get("links") or []:
             print(f"      [{l.get('label')}] {l.get('retailer')} {l.get('url')} page {l.get('page_price')} listing {l.get('listing_price')} verified {l.get('verified_price')} {l.get('detail') or ''}")
 print("\nTOP results (existing Recommendation Engine, verified only):")

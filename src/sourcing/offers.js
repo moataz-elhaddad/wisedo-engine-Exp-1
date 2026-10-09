@@ -14,7 +14,7 @@
 //                          - not unreachable / not out of stock when the page could be checked
 // A candidate without a verified offer is "discovered_unverified": reported with its exclusion reason, never ranked.
 import { parseListing, listingMatches, MIN_LAPTOP_PRICE_EGP, MAX_LAPTOP_PRICE_EGP } from './listings.js';
-import { classifyUrl } from './url-classify.js';
+import { classifyUrl, canonicalUrl } from './url-classify.js';
 import { verifyUrl } from './verify.js';
 
 /** Exclusion reasons, most informative first (the first one present becomes the candidate's exclusion_reason). */
@@ -40,7 +40,7 @@ const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, '').t
  */
 export function collectOffers(products, listings, opts = {}) {
   // Accessories ("battery for TUF F15") are neither evidence nor offers.
-  const parsed = listings.filter((l) => l && l.url).map((l) => ({ ...parseListing(l), cls: classifyUrl(l.url) })).filter((l) => !l.accessory);
+  const parsed = listings.filter((l) => l && l.url).map((l) => ({ ...l, url: canonicalUrl(l.url) })).map((l) => ({ ...parseListing(l), cls: classifyUrl(l.url) })).filter((l) => !l.accessory);
   for (const p of products) {
     p.llm_claims = (p.offers || []).filter((o) => o.source !== 'listing').map((o) => ({
       provider: o.provider, retailer: o.retailer || null, url: o.url || null, price_egp: o.price_egp ?? null,
@@ -55,7 +55,7 @@ export function collectOffers(products, listings, opts = {}) {
     const reject = (reason, url, detail) => p.rejections.push({ reason, url: url || null, ...(detail ? { detail } : {}) });
 
     // A candidate made from a listing owns that listing's URL, even when the search was run for another candidate.
-    const ownUrls = new Set((p.offers || []).filter((o) => o.source === 'listing' && o.url).map((o) => o.url));
+    const ownUrls = new Set((p.offers || []).filter((o) => o.source === 'listing' && o.url).map((o) => canonicalUrl(o.url)));
     for (const l of parsed) {
       const mine = l.for_key === p.key || ownUrls.has(l.url);
       if (l.for_key && !mine) continue;
@@ -251,7 +251,7 @@ export function candidateReport(p, productId) {
     evidence_confidence: p.evidence_confidence, exclusion_reason: p.exclusion_reason,
     rejections: dedupeRejections(p.rejections), country: p.country, currency: p.currency,
     variant_match_strength: p.variant_match_strength,
-    links: p.links || [], link_counts: p.link_counts || null, search: p.search || null,
+    links: p.links || [], link_counts: p.link_counts || null, search: p.search || null, found_via: p.found_via || null, same_specs_note: p.same_specs_note || null,
     evidence_sources: (p.evidence_sources || []).slice(0, 12), page_checks: p.page_checks || [], fit_reasons: p.fit_reasons, possible_duplicates: p.possible_duplicates,
   };
 }
