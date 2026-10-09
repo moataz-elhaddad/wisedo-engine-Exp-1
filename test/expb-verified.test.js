@@ -620,3 +620,25 @@ test('page checks are spread across candidates: every candidate\'s first URL bef
   await verifyOffers(products, { fetch: f, maxUrls: 3 });
   assert.equal(new Set(f.calls.map((c) => c.url.match(/15iah(\d)/)[1])).size, 3);
 });
+
+test('live regression: model+specs pages do not end the search for an MPN that no store lists; store and MPN searches still run', async () => {
+  const { resolveCandidates } = await import('../src/sourcing/search-plan.js');
+  const cand = { key: 'c1', brand: 'Lenovo', model: 'IdeaPad Slim 3 15IAH8', mpn: '83ER00ABED', cpu: 'Intel Core i5-12450H', ram_gb: 16, storage_gb: 512 };
+  const pages = [
+    { title: 'Lenovo IdeaPad Slim 3 15IAH8 Intel Core i5-12450H 16GB DDR5 512GB SSD 15.6"', url: 'https://compuscience.com.eg/ar/laptop/4446-lenovo-ideapad-slim-3-15iah8-i5-12450h-16gb-512gb.html' },
+    { title: 'Lenovo IdeaPad Slim 3 15IAH8 Core i5-12450H 16GB 512GB', url: 'https://www.amazon.eg/-/en/Lenovo-IdeaPad-Slim-Gen-Integrated/dp/B0D3R2947R' },
+  ];
+  const seen = [];
+  const r = await resolveCandidates([cand], async (qs) => { seen.push(...qs); return qs.map(() => pages.map((p) => ({ provider: 'serper', kind: 'web', ...p }))); }, { maxQueries: 100 });
+  assert.equal(r.diagnostics.c1.resolved_at, null);
+  assert.ok(seen.includes('"83ER00ABED" site:btech.com'), 'MPN store searches ran');
+  assert.ok(seen.includes('"Lenovo IdeaPad Slim 3 15IAH8" site:dream2000.com'));
+});
+
+test('live regression: a page naming a sibling SKU (83ER00BEED) is a different variant for an 83ER00ABED candidate', async () => {
+  const url = 'https://eshop.vodafone.com.eg/en/prod/lenovo-ideapad-slim-3-15iah8-intel-core-i5-12450h-16gb-ram-512gb-ssd';
+  const page = '<title>Lenovo IdeaPad Slim 3 15IAH8 83ER00BEED Intel Core i5-12450H 16GB RAM 512GB SSD</title><script type="application/ld+json">{"@type":"Product","offers":{"price":"24399","priceCurrency":"EGP","availability":"InStock"}}</script>';
+  const { p } = await run({ ...NO_URL, mpn: '83ER00ABED' }, [{ provider: 'tavily', kind: 'web', title: 'Lenovo IdeaPad Slim 3 15IAH8 Intel Core i5-12450H 16GB RAM 512GB SSD', url }], { [url]: page });
+  assert.equal(p.status, 'discovered_unverified');
+  assert.equal(p.links.find((l) => l.url === url).status, 'variant_mismatch');
+});

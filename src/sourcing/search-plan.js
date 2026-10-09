@@ -75,11 +75,11 @@ export function searchPlan(c, opts = {}) {
 /** Does this listing resolve the candidate (an Egyptian direct product page of the exact variant)? */
 export function resolves(cand, listing) {
   const cls = classifyUrl(listing.url);
-  if (cls.type !== 'direct_product' || !cls.egypt) return false;
+  if (cls.type !== 'direct_product' || !cls.egypt) return null;
   const l = parseListing(listing);
-  if (l.accessory) return false;
+  if (l.accessory) return null;
   const m = listingMatches(cand, l);
-  return m.match && (m.strength === 'mpn' || m.strength === 'model+specs');
+  return m.match && (m.strength === 'mpn' || m.strength === 'model+specs') ? m.strength : null;
 }
 
 /**
@@ -103,11 +103,13 @@ export async function resolveCandidates(cands, searchBatch, opts = {}) {
   const exact = new Map(cands.map((c) => [c.key, []]));
   // Resolved = exact pages on three stores, or on two stores of which one the Worker can check. One exact page is
   // not enough (live: a single Vodafone eShop hit ended the search and the store searches never ran; it then blocked).
-  const settle = (c, url, stage) => {
+  const settle = (c, url, stage, strength) => {
     if (done.has(c.key) || exact.get(c.key).some((x) => x.url === url)) return;
     const h = classifyUrl(url).host || '';
-    exact.get(c.key).push({ url, host: h, checkable: !(opts.uncheckable || []).some((x) => h === x || h.endsWith('.' + x)) });
-    const stores = new Set(exact.get(c.key).map((x) => x.host));
+    exact.get(c.key).push({ url, host: h, mpn: strength === 'mpn', checkable: !(opts.uncheckable || []).some((x) => h === x || h.endsWith('.' + x)) });
+    // With an MPN, only pages naming that MPN count (live: model+specs pages "resolved" 83ER00ABED, a SKU no store
+    // lists, so the store and MPN searches never ran).
+    const stores = new Set(exact.get(c.key).filter((x) => !c.mpn || x.mpn).map((x) => x.host));
     diag[c.key].exact_urls_found = exact.get(c.key).length;
     diag[c.key].exact_stores = [...stores];
     if (stores.size >= 3 || (stores.size >= 2 && exact.get(c.key).some((x) => x.checkable))) { done.add(c.key); diag[c.key].resolved_at = stage; }
@@ -138,7 +140,8 @@ export async function resolveCandidates(cands, searchBatch, opts = {}) {
         listings.push(stage === 'family' ? { ...l, family_search: j.q, search_kind: j.kind } : { ...l, for_key: j.c.key, search_kind: j.kind, search_query: j.q });
         const cls = classifyUrl(l.url);
         if (cls.type === 'direct_product' && cls.egypt && !seenUrl.get(j.c.key).has(l.url)) { seenUrl.get(j.c.key).add(l.url); d.direct_urls_found++; }
-        if (!done.has(j.c.key) && resolves(j.c, l)) settle(j.c, l.url, stage);
+        const strength = !done.has(j.c.key) && resolves(j.c, l);
+        if (strength) settle(j.c, l.url, stage, strength);
       }
     });
   }

@@ -163,9 +163,14 @@ export function compareToPage(text, cand) {
   const mpn = cand.mpn ? flat.includes(cand.mpn.toLowerCase().replace(/[^a-z0-9]/g, '')) : false;
   const cpuT = cpuToken(cand.cpu);
   const cpuDigits = cpuT ? (cpuT.split('-')[1] || '').replace(/[^0-9a-z]/g, '') : '';
+  // A sibling part number on the page (same 6+ character prefix) without ours = another SKU of the family
+  // (live: a Vodafone 83ER00BEED page attached to an 83ER00ABED candidate through a title without the MPN).
+  const want = cand.mpn ? cand.mpn.toLowerCase().replace(/[^a-z0-9]/g, '') : '';
+  const otherMpn = want.length >= 8 && !mpn ? (t.match(/[a-z0-9]{8,14}/g) || []).find((x) => x !== want && x.slice(0, 6) === want.slice(0, 6) && /\d/.test(x) && /[a-z]/.test(x)) || null : null;
   return {
     brand,
     mpn,
+    other_mpn: otherMpn,
     modelShare: toks.length ? hit / toks.length : 0,
     specs: {
       ram: cand.ram_gb ? new RegExp(`\\b${cand.ram_gb}\\s*gb`).test(t) : null,
@@ -210,7 +215,7 @@ export async function verifyUrl(url, cand, opts = {}) {
     const specOk = specChecks.every(Boolean);
     const prices = pagePrices(html);
     let status;
-    if (!cmp.brand || (cmp.modelShare < 0.4 && !cmp.mpn) || isAccessoryTitle(title)) status = 'mismatch';
+    if (!cmp.brand || (cmp.modelShare < 0.4 && !cmp.mpn) || cmp.other_mpn || isAccessoryTitle(title)) status = 'mismatch';
     else if ((cmp.mpn || cmp.modelShare >= 0.6) && specOk) status = 'verified';
     else status = 'partial';
     const offer = pageOffer(html, res.url || url);
