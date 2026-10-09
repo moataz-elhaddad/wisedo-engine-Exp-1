@@ -642,3 +642,9 @@ test('live regression: a page naming a sibling SKU (83ER00BEED) is a different v
   assert.equal(p.status, 'discovered_unverified');
   assert.equal(p.links.find((l) => l.url === url).status, 'variant_mismatch');
 });
+
+test('a model + specs URL for a candidate with an MPN is labelled as such, never "exact" for the MPN', async () => {
+  const url = 'https://www.noon.com/egypt-en/lenovo-ideapad-slim-3-15iah8-i5-12450h-16gb-512gb/N70026614V/p/';
+  const { p } = await run({ ...NO_URL, mpn: '83ER00ABED' }, [listing(IDEAPAD_TITLE, url, 'EGP 31,999.00', 'Noon')]);
+  assert.equal(p.links[0].label, 'model + specs URL found, page blocked (MPN 83ER00ABED not confirmed)');
+});

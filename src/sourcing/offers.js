@@ -107,7 +107,7 @@ export function collectOffers(products, listings, opts = {}) {
  * @param {{fetch?: typeof fetch, enabled?: boolean, maxUrls?: number, timeoutMs?: number}} [opts]
  */
 export async function verifyOffers(products, opts = {}) {
-  const maxUrls = opts.maxUrls ?? 30;
+  const maxUrls = opts.maxUrls ?? 40;
   const jobs = [];
   const seen = new Set();
   // Listing-backed leads first (they already carry a price and a variant signal), then LLM URLs.
@@ -125,8 +125,13 @@ export async function verifyOffers(products, opts = {}) {
   };
   // Round-robin across candidates inside each tier: every candidate's best URL is checked before anyone's second
   // (live: 246 direct URLs, 24 checks, 14 candidates left unchecked while others had several pages checked).
-  const ordered = products.flatMap((p) => (p._potential || []).map((o) => ({ p, o, w: rank(o) + outOfReach(p, o) })).sort((a, b) => a.w - b.w).map((j, n) => ({ ...j, n })))
-    .sort((a, b) => Math.floor(a.w / 10) - Math.floor(b.w / 10) || a.n - b.n || a.w - b.w);
+  // Tiers: shortlisted candidates (the ones searched by exact model) before listing-derived ones, products that can fit
+  // the budget before those that cannot. Inside a candidate, stores that answer the Worker before Amazon (it often
+  // serves a challenge page) - a ranking only, nothing is skipped beyond UNCHECKABLE_HOSTS.
+  const hostPenalty = (u) => (/(^|\.)amazon\.eg$/.test(hostOf(u)) ? 0.5 : 0);
+  const tier = (p, o) => (outOfReach(p, o) ? 2 : 0) + (p.search && p.search.queries > 0 ? 0 : 1);
+  const ordered = products.flatMap((p) => (p._potential || []).map((o) => ({ p, o, w: rank(o) + hostPenalty(o.url), t: tier(p, o) })).sort((a, b) => a.w - b.w).map((j, n) => ({ ...j, n })))
+    .sort((a, b) => a.t - b.t || a.n - b.n || a.w - b.w);
   const skipped = [];
   for (const j of ordered) {
     if (opts.enabled === false || jobs.length >= maxUrls || seen.has(j.o.url + '|' + j.p.key)) continue;
@@ -222,7 +227,8 @@ export const LINK_LABEL = {
 const LINK_ORDER = ['live_verified', 'blocked', 'not_checked', 'no_price', 'weak_match', 'out_of_stock', 'variant_mismatch', 'unreachable', 'category_or_search_page'];
 
 function link(p, o, status, extra = {}) {
-  (p.links = p.links || []).push({ url: o.url, retailer: o.retailer || null, status, label: LINK_LABEL[status], direct: true, checked: status !== 'blocked' && status !== 'not_checked', provider: o.provider || null, via: o.via || null, ...extra });
+  const mpnUnconfirmed = p.mpn && o.strength === 'model+specs' && ['blocked', 'not_checked', 'no_price'].includes(status);
+  (p.links = p.links || []).push({ url: o.url, retailer: o.retailer || null, status, label: mpnUnconfirmed ? `${LINK_LABEL[status].replace('exact match', 'model + specs match')} (MPN ${p.mpn} not confirmed)`.replace('exact URL found', 'model + specs URL found') : LINK_LABEL[status], direct: true, checked: status !== 'blocked' && status !== 'not_checked', provider: o.provider || null, via: o.via || null, ...extra });
 }
 
 function sortLinks(links) {
