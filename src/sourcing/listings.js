@@ -1,0 +1,274 @@
+// Experiment B: web-search and shopping results ("listings") -> structured facts, deterministically.
+//
+// A listing is one search/shopping hit: {provider, kind: 'web'|'shopping', title, url, snippet, price_text, source}.
+// parseListing() reads brand, model, CPU, RAM, storage, GPU, display, price and currency from its text with fixed
+// rules (no LLM). A listing becomes a stand-alone discovery candidate only when the full configuration
+// (CPU + RAM + storage + GPU) and an EGP price are readable; otherwise it is used as evidence only.
+import { canonicalBrand } from './specs.js';
+import { isEgyptianProductPage } from './url-classify.js';
+import { modelTokens, cpuToken, gpuToken, signature } from './consolidate.js';
+
+/** Egyptian retailers' hosts (also used to decide whether a listing is relevant to Egypt). */
+export const EGYPT_HOSTS = ['amazon.eg', 'noon.com', 'btech.com', '2b.com.eg', 'rayashop.com', 'jumia.com.eg', 'dubaiphone.net', 'compumarts.com',
+  'elbadrgroupeg.store', 'elbadrgroup.com', 'sigma-computer.com', 'elarabygroup.com', 'select.com.eg', 'tradeline-stores.com', 'cairosales.com', 'dream2000.com', 'carrefouregypt.com'];
+
+const BRAND_WORDS = [
+  ['lenovo', 'Lenovo'], ['لينوفو', 'Lenovo'], ['hp', 'HP'], ['اتش بي', 'HP'], ['إتش بي', 'HP'], ['dell', 'Dell'], ['ديل', 'Dell'],
+  ['asus', 'Asus'], ['اسوس', 'Asus'], ['أسوس', 'Asus'], ['acer', 'Acer'], ['ايسر', 'Acer'], ['أيسر', 'Acer'], ['apple', 'Apple'], ['macbook', 'Apple'],
+  ['ماك بوك', 'Apple'], ['msi', 'MSI'], ['huawei', 'Huawei'], ['هواوي', 'Huawei'], ['samsung', 'Samsung'], ['microsoft', 'Microsoft'], ['surface', 'Microsoft'],
+  ['honor', 'Honor'], ['xiaomi', 'Xiaomi'], ['gigabyte', 'Gigabyte'], ['razer', 'Razer'], ['infinix', 'Infinix'], ['chuwi', 'Chuwi'],
+];
+
+const host = (u) => { try { return new URL(u).hostname.replace(/^www\./, '').toLowerCase(); } catch { return null; } };
+
+/** Is this URL/listing relevant to Egypt? */
+export function isEgyptian(url, currency) {
+  const h = host(url);
+  if (currency === 'EGP') return true;
+  if (!h) return false;
+  if (h.endsWith('.eg')) return true;
+  if (h === 'noon.com' || h.endsWith('.noon.com')) return /\/egypt/.test(String(url));
+  return EGYPT_HOSTS.some((x) => h === x || h.endsWith('.' + x));
+}
+
+/**
+ * Price and currency from text like "EGP 32,999.00", "32,999 جنيه", "E£32,999", "$599.99", "AED 2,499".
+ * @returns {{price: number|null, currency: string|null}}
+ */
+export function parsePrice(text) {
+  const s = String(text ?? '').replace(/ /g, ' ');
+  const pats = [
+    [/(?:EGP|E£|LE|L\.E\.?|ج\.?م\.?|جنيه(?:ا)?(?: مصري)?)\s*([\d٠-٩][\d٠-٩,.]*)/i, 'EGP'],
+    [/([\d٠-٩][\d٠-٩,.]*)\s*(?:EGP|E£|LE\b|L\.E\.?|ج\.?م\.?|جنيه)/i, 'EGP'],
+    [/(?:US\$|\$|USD)\s*([\d,.]+)/i, 'USD'], [/([\d,.]+)\s*(?:USD|\$)/i, 'USD'],
+    [/(?:AED|SAR|€|EUR|£|GBP)\s*([\d,.]+)/i, 'OTHER'],
+  ];
+  for (const [re, cur] of pats) {
+    const m = s.match(re);
+    if (!m) continue;
+    const digits = m[1].replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
+    // "32,999.00" / "32.999" (thousands dot) / "32999"
+    let n;
+    const d = digits.replace(/[.,]$/, '');
+    if (/^\d{1,3}(\.\d{3})+$/.test(d)) n = Number(d.replace(/\./g, ''));
+    else if (/^\d{1,3}(,\d{3})*,\d{3}00$/.test(d)) n = Number(d.replace(/,/g, '').slice(0, -2)); // "45,79900": cents glued on
+    else if (/^\d{1,3}(\.\d{3})*,\d{2}$/.test(d)) n = Number(d.replace(/\./g, '').replace(',', '.')); // "45.799,00"
+    else n = Number(d.replace(/,/g, ''));
+    if (cur === 'EGP' && n > MAX_LAPTOP_PRICE_EGP) continue; // a parsing error, not a laptop price
+    if (Number.isFinite(n) && n > 0) return { price: Math.round(n), currency: cur };
+  }
+  return { price: null, currency: null };
+}
+
+// Lower case, with Arabic unit words mapped to GB/TB so the spec patterns read Arabic titles too.
+const lc = (s) => String(s ?? '').toLowerCase().replace(/جيجا(?:بايت)?|جيجابايت|جيجا بايت/g, 'gb').replace(/تيرا(?:بايت)?/g, 'tb');
+
+function brandOf(text) {
+  const t = ' ' + lc(text) + ' ';
+  let best = null, at = Infinity;
+  for (const [w, b] of BRAND_WORDS) {
+    const i = /^[a-z]+$/.test(w) ? t.search(new RegExp(`[^a-z]${w}[^a-z]`)) : t.indexOf(w);
+    if (i >= 0 && i < at) { at = i; best = b; }
+  }
+  return best;
+}
+
+/** RAM GB: "16GB RAM", "16 GB DDR5", "RAM 16GB", "16GB/512GB" (first of a pair). */
+function ramOf(t) {
+  let m = t.match(/(\d{1,2})\s*gb\s*(?:of\s*)?(?:ram|ddr\d?x?|lpddr\d?x?|memory|unified|رام|رامات)/) || t.match(/(?:ram|رام|رامات|memory)\s*:?\s*(\d{1,2})\s*gb/);
+  if (m) return Number(m[1]);
+  m = t.match(/\b(\d{1,2})\s*gb\s*[/|,]?\s*(\d{3,4}\s*gb|\d\s*tb)/);
+  if (m) return Number(m[1]);
+  // Store titles like "512GB SSD 16GB": a lone laptop-RAM size that is not graphics memory ("RTX 3050 4GB", "6GB GDDR6").
+  for (const x of t.matchAll(/\b(8|12|16|24|32|64)\s*gb\b(?!\s*(?:gddr|vram|graphics|video|dedicated))/g)) {
+    if (!/(rtx|gtx|rx|arc|graphics|vga|geforce|radeon)[^,|]{0,14}$/.test(t.slice(Math.max(0, x.index - 24), x.index))) return Number(x[1]);
+  }
+  return null;
+}
+
+/** Storage GB: "512GB SSD", "1TB NVMe", "SSD 512GB", "16GB/512GB". */
+function storageOf(t) {
+  let m = t.match(/(\d{3,4})\s*gb\s*(?:pcie\s*|nvme\s*|m\.2\s*)*(?:ssd|nvme|pcie|emmc|storage|هارد)/) || t.match(/(\d(?:\.\d)?)\s*tb\s*(?:pcie\s*|nvme\s*)*(?:ssd|nvme|pcie|hdd|storage|هارد)?/) || t.match(/(?:ssd|storage)\s*:?\s*(\d{3,4})\s*gb/);
+  if (m) return /tb/.test(m[0]) ? Math.round(Number(m[1]) * 1024) : Number(m[1]);
+  m = t.match(/\b\d{1,2}\s*gb\s*[/|,]?\s*(\d{3,4})\s*gb/);
+  return m ? Number(m[1]) : null;
+}
+
+function cpuText(t) {
+  const m = t.match(/(intel\s*)?core\s*ultra\s*[579]\s*-?\s*\d{3}[a-z]*|(?:intel\s*)?(?:core\s*)?i[3579]\s*-?\s*\d{4,5}[a-z]*|core\s*[357]\s*-?\s*\d{3}[a-z]*|ryzen\s*ai\s*[579]\s*\w*\s*\d{3}[a-z]*|ryzen\s*[3579]\s*(?:pro\s*)?\d{4}[a-z]*|apple\s*m[1-5](?:\s*(?:pro|max))?|\bm[1-5]\s*(?:pro|max)?\s*chip|snapdragon\s*x\s*\w*|celeron\s*n?\d{4}|\bn[12]\d{2}\b/);
+  if (!m) return null;
+  const s = m[0].replace(/\s*chip$/, '');
+  return /^m[1-5]/.test(s) ? `Apple ${s.toUpperCase()}` : s;
+}
+
+function gpuText(t) {
+  const m = t.match(/(?:nvidia\s*)?(?:geforce\s*)?rtx\s*a?\d{4}(?:\s*ti)?|(?:geforce\s*)?gtx\s*\d{3,4}(?:\s*ti)?|radeon\s*rx\s*\d{4}[a-z]*|\barc\s*a\d{3}m?|iris\s*xe|uhd\s*graphics|intel\s*arc(?:\s*graphics)?|radeon\s*(?:\d{3}m|graphics)|intel\s*graphics/);
+  if (m) return m[0];
+  return null;
+}
+
+function displayText(t) {
+  const m = t.match(/(1[0-8](?:\.\d)?)\s*(?:"|''|”|-?\s*inch(?:es)?|بوصة)[^,|;]{0,40}/);
+  return m ? m[0].trim() : null;
+}
+
+/** Model text: the title with brand prefix stripped, cut at the first spec-ish separator. */
+function modelOf(title, brand) {
+  let s = String(title ?? '').replace(/^(?:لاب ?توب|laptop|notebook)\s+/i, '');
+  if (brand) {
+    const re = new RegExp(`^.*?\\b${brand.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b\\s*`, 'i');
+    s = s.replace(re, '');
+  }
+  s = s.split(/\s[-–|(,]\s?|,|\s\d+\s*(?:gb|tb)\b|\schip\b|\s(?:laptop|notebook|gaming laptop|لاب ?توب)\b|\s(?:intel|amd|core|ryzen|with|بمعالج)\b/i)[0];
+  return s.trim().slice(0, 80) || null;
+}
+
+/**
+ * @param {{provider: string, kind: string, title: string, url: string, snippet?: string, price_text?: string, source?: string}} l
+ */
+/**
+ * Parts and accessories sold "for" a laptop model (keyboards, batteries, chargers, screens, fans, covers...). They
+ * name the model, so without this they match it (live: 11 of 20 page checks were spent on them).
+ */
+const ACCESSORY = /\b(replacement|compatible\s+(?:with|for)|for\s+(?:asus|lenovo|hp|dell|acer|msi|apple|macbook|huawei|samsung)\b|keyboard\s+(?:cover|skin|protector)|laptop\s+battery|battery\s+(?:for|\d{2,3}\s*wh)|\d{2,3}\s*wh\b|charger|ac\s+adapter|power\s+adapter|cooling\s+(?:fan|pad)|screws?\b|sleeve|carrying\s+case|screen\s+protector|keycaps?|motherboard|hinges?)\b|بطارية|شاحن|كيبورد\s+لـ|جراب/i;
+export function isAccessoryTitle(title) { return ACCESSORY.test(String(title || '')); }
+
+/** The words of a product URL's path: many Egyptian stores spell the full configuration in the slug. */
+function slugText(url) {
+  try { return decodeURIComponent(new URL(url).pathname).replace(/\.html?$/, '').replace(/[-_/+]+/g, ' ').replace(/core\s*i([3579])\s+(\d{4,5}[a-z]*)/gi, 'core i$1-$2').replace(/corei([3579])/gi, 'core i$1'); } catch { return ''; }
+}
+
+/** Shop spellings of processors: "R7 7435HS", "Ryzen™"/"RyzenTM", "Ci7-13620H", "Corei7". */
+function specNorm(s) {
+  return String(s ?? '').replace(/ryzen\s*(?:tm|™)/gi, 'ryzen').replace(/\br([3579])[\s-]+(\d{4}[a-z]{0,2})\b/gi, 'ryzen $1 $2')
+    .replace(/\bc(?:ore\s*)?i([3579])[\s-]*(\d{4,5}[a-z]{0,2})\b/gi, 'core i$1-$2').replace(/corei([3579])/gi, 'core i$1')
+    .replace(/ddr([345])x?(\d{3,4}\s*(?:gb|tb))/gi, 'ddr$1 $2');
+}
+
+export function parseListing(l) {
+  const text = specNorm(`${l.title || ''} ${l.snippet || ''} ${slugText(l.url)}`);
+  const t = lc(text);
+  const titleL = lc(specNorm(l.title || ''));
+  const brand = brandOf(l.title || '') || brandOf(text);
+  // A structured price (shopping result, rich-snippet price) is a listing fact; a number read out of free text
+  // (snippets, page excerpts: "save EGP ...", instalments, other products) is not, and never verifies an offer.
+  const fromField = parsePrice(l.price_text || '');
+  const { price, currency } = fromField.price ? fromField : parsePrice(text);
+  const price_from = fromField.price ? 'field' : price ? 'text' : null;
+  const cpu = cpuText(titleL) || cpuText(t);
+  const gpu = gpuText(titleL) || gpuText(t);
+  return {
+    ...l,
+    brand,
+    model: brand ? modelOf(l.title, brand) : null,
+    cpu, gpu,
+    ram_gb: ramOf(titleL) ?? ramOf(t),
+    storage_gb: storageOf(titleL) ?? storageOf(t),
+    display: displayText(titleL) || displayText(t),
+    price_egp: currency === 'EGP' ? price : null,
+    price, currency, price_from, accessory: isAccessoryTitle(l.title),
+    retailer: l.source || host(l.url),
+    host: host(l.url),
+    egypt: isEgyptian(l.url, currency),
+  };
+}
+
+/** Below this an "EGP laptop price" is an accessory, an instalment or a parsing error (live check: 1,520 EGP). */
+export const MIN_LAPTOP_PRICE_EGP = 8000;
+/** Above this an "EGP laptop price" is a parsing error (live check: 4,579,900 from "45,799.00"). */
+export const MAX_LAPTOP_PRICE_EGP = 600000;
+
+/**
+ * Not a retailer: classifieds / second-hand marketplaces (used or unofficial units) and price-comparison sites
+ * (they point at other shops). Their pages are evidence, never a retail offer.
+ */
+export const CLASSIFIEDS_HOSTS = ['dubizzle.com.eg', 'dubizzle.com', 'olx.com.eg', 'opensooq.com', 'facebook.com', 'hatla2ee.com',
+  'pricena.com', 'yaoota.com', 'pricespy.com', 'idealo.com', 'pricerunner.com'];
+export function isClassifieds(url) {
+  let h;
+  try { h = new URL(url).hostname.replace(/^www\./, '').toLowerCase(); } catch { return false; }
+  return CLASSIFIEDS_HOSTS.some((x) => h === x || h.endsWith('.' + x));
+}
+
+/** Category, search, blog and video pages describe many products: never a product listing. */
+export function looksLikeProductPage(url) {
+  let u;
+  try { u = new URL(url); } catch { return false; }
+  const h = u.hostname.replace(/^www\./, ''), path = u.pathname.toLowerCase();
+  if (/youtube\.com|youtu\.be|facebook\.com|tiktok\.com|reddit\.com/.test(h) || /^blog\./.test(h)) return false;
+  if (/\/(c|s|search|category|categories|collections|blogs?|buying-guides|tag|compare)(\/|$)/.test(path) && !/\/products?\//.test(path)) return false;
+  if (u.search && /[?&](q|k|s|search|dFR|rh)=/.test(u.search)) return false;
+  if (/\/(laptops?|computers?|notebooks?)(\.html)?\/?$/.test(path)) return false;
+  if (/\/q-[^/]+\/?$/.test(path)) return false; // dubizzle-style search pages
+  return true;
+}
+
+/**
+ * A shopping listing that is a full configuration with an EGP price, as a normalised candidate (normalize.js shape).
+ * Web-search pages never become candidates (a category page once did, with a nonsense price): they are evidence only.
+ */
+export function listingCandidate(p, now) {
+  // Shopping hits, and web hits that are a single product page on an Egyptian store (url-classify.js). Category,
+  // search, article and foreign pages never become candidates (a category page once did, with a nonsense price).
+  // A web hit needs a full configuration; its price counts only when structured (otherwise the product page must
+  // supply it during verification, offers.js). Shopping hits always carry a structured price.
+  const web = p.kind === 'web';
+  if (!(p.kind === 'shopping' || (web && isEgyptianProductPage(p.url)))) return null;
+  if (!p.brand || !p.model || p.accessory) return null;
+  if (web && !(p.cpu && p.ram_gb && p.storage_gb)) return null;
+  if (web && p.price_from !== 'field') p = { ...p, price_egp: null };
+  if (!web && (p.price_egp === null || p.price_egp < MIN_LAPTOP_PRICE_EGP)) return null;
+  if (p.price_egp !== null && p.price_egp < MIN_LAPTOP_PRICE_EGP) p = { ...p, price_egp: null };
+  // Shop titles rarely name integrated graphics. With a laptop CPU named and no dedicated card anywhere in the text,
+  // the GPU is taken as integrated (flagged gpu_assumed). Dedicated cards are always named in Egyptian shop titles.
+  const dedicatedMentioned = /rtx|gtx|radeon\s*rx|\barc\s*a\d|nvidia|geforce|\bmx\s*\d{3}/i.test(`${p.title} ${p.snippet || ''}`);
+  const gpuAssumed = !p.gpu && p.cpu && !dedicatedMentioned;
+  if (gpuAssumed) p = { ...p, gpu: 'integrated graphics (assumed: none named)' };
+  const c = {
+    provider: p.provider, brand: canonicalBrand(p.brand), model: p.model, mpn: null, cpu: p.cpu, ram_gb: p.ram_gb, storage_gb: p.storage_gb,
+    gpu: p.gpu || null, display: p.display, screen_inches: null, os: null, weight_kg: null, battery_hours: null, warranty_months: null,
+    price_egp: p.price_egp, currency: 'EGP', price_basis: p.price_egp ? 'listing' : 'page_check_needed', availability: 'listed', grey_import: null,
+    offers: [{ retailer: p.retailer, url: p.url, price_egp: p.price_egp, source: 'listing' }],
+    fit_reasons: [], confidence: null, evidence: `${p.kind} listing: ${p.title}`.slice(0, 300),
+    evidence_urls: [p.url].filter(Boolean), timestamp: now || null, from_listing: true, ...(gpuAssumed ? { gpu_assumed: true } : {}),
+  };
+  return signature(c) ? c : null;
+}
+
+/**
+ * Does a parsed listing describe this (consolidated) candidate? Conservative: any readable spec that conflicts
+ * rejects the match; a positive match needs the MPN in the text, or most of the model-name tokens.
+ * @returns {{match: boolean, strength: 'mpn'|'model+specs'|'model'|null, why: string}}
+ */
+function commonPrefix(a, b) {
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  return i;
+}
+
+export function listingMatches(cand, p) {
+  if (!p.brand || canonicalBrand(p.brand) !== cand.brand) return { match: false, strength: null, why: 'brand' };
+  if (p.ram_gb && cand.ram_gb && p.ram_gb !== cand.ram_gb) return { match: false, strength: null, why: 'ram differs' };
+  if (p.storage_gb && cand.storage_gb && p.storage_gb !== cand.storage_gb) return { match: false, strength: null, why: 'storage differs' };
+  const ct = cpuToken(cand.cpu), pt = cpuToken(p.cpu);
+  if (ct && pt && ct !== pt) return { match: false, strength: null, why: 'cpu differs' };
+  const cg = gpuToken(cand.gpu, cand.cpu), pg = gpuToken(p.gpu, p.cpu);
+  if (cg && pg && cg !== pg) return { match: false, strength: null, why: 'gpu differs' };
+  const flat = lc(`${p.title} ${p.snippet || ''}`).replace(/[^a-z0-9]+/g, '');
+  const mpn = cand.mpn ? lc(cand.mpn).replace(/[^a-z0-9]/g, '') : null;
+  if (mpn && mpn.length >= 6 && !flat.includes(mpn)) {
+    // Another part number of the same family (shared 6+ character prefix) = another variant: never a match.
+    const other = lc(`${p.title} ${p.snippet || ''}`).split(/[\s,;|()/]+/).map((t) => t.replace(/[^a-z0-9]/g, ''))
+      .find((t) => t.length >= 6 && t !== mpn && commonPrefix(t, mpn) >= 6);
+    if (other) return { match: false, strength: null, why: `mpn differs (${other})` };
+  }
+  if (mpn && flat.includes(mpn)) return { match: true, strength: 'mpn', why: 'MPN in listing' };
+  const toks = [...modelTokens(cand.model, cand.brand)];
+  if (!toks.length) return { match: false, strength: null, why: 'no model tokens' };
+  const hit = toks.filter((k) => flat.includes(k)).length / toks.length;
+  if (hit < 0.75) return { match: false, strength: null, why: `model tokens ${hit.toFixed(2)}` };
+  const specsSeen = [p.ram_gb, p.storage_gb, pt].filter(Boolean).length;
+  // A model name is shared by many configurations: the processor or the graphics card must be seen agreeing too.
+  const coreSeen = !!(ct && pt); // the GPU alone is shared by many processors (live: TUF A15 R5 6600H vs R7 7435HS)
+  return { match: true, strength: specsSeen >= 2 && coreSeen ? 'model+specs' : 'model', why: `model tokens ${hit.toFixed(2)}, ${specsSeen} specs agree${coreSeen ? '' : ', CPU not confirmed'}` };
+}

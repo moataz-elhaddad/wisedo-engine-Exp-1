@@ -1,0 +1,189 @@
+// Experiment B routes (Exp-1 Worker only).
+//
+//   GET  /api/expb/status        which discovery providers are configured (names only) and which secrets are missing
+//   POST /api/expb/run           body {profile}: the FINAL NeedProfile from the existing Layer 1 session (result screen)
+//                                -> multi-LLM discovery -> consolidation -> verification -> ephemeral snapshot
+//                                -> existing Recommendation Engine (match, rank) -> Top 3, plus the catalog Top 3
+//                                for the same profile (comparison only)
+//   GET  /api/expb/runs          recent run logs (admin)
+//
+// Access: /run spends API money, so it needs the admin token unless EXPB_PUBLIC = "1"; plus a per-IP limit.
+// Nothing discovered is written to the catalog tables; only a run log row (metrics + Top 3) goes to expb_runs.
+import { validateNeedProfile } from '../src/contracts.js';
+import { providersFromEnv } from '../src/sourcing/providers.js';
+import { diagnoseProviders } from '../src/sourcing/diagnose.js';
+import { LLMProductDiscoverySource, ExistingCatalogProductSource, recommendWith } from '../src/sourcing/product-source.js';
+import { CONFIGS } from './bundle.js';
+import * as store from './store.js';
+import { allowLlmCall } from './llm.js';
+
+export const EXPB_CATEGORIES = ['laptop'];
+
+const pickRow = (pick, index) => {
+  const meta = index ? index[pick.product.id] : null;
+  return {
+    rank: pick.rank ?? null,
+    role: pick.role,
+    product: pick.product,
+    score: pick.score,
+    fit: pick.fit,
+    affordability: pick.affordability,
+    price: pick.quote && pick.quote.price,
+    effCost: pick.quote && pick.quote.effCost,
+    retailer: pick.quote && pick.quote.retailerName,
+    url: pick.quote && pick.quote.url,
+    reasons: pick.reasons,
+    notListed: pick.notListed,
+    warnings: pick.warnings,
+    ...verifiedFields(meta),
+  };
+};
+
+/** Only verified Egyptian product pages reach the snapshot, so a ranked row always carries its direct link. */
+function verifiedFields(meta) {
+  return {
+    verified: !!(meta && meta.verified_product_url),
+    mpn: meta ? meta.mpn || null : null,
+    variant_match_strength: meta ? meta.variant_match_strength || null : null,
+    verified_price: meta ? meta.verified_price ?? null : null,
+    verified_retailer: meta ? meta.verified_retailer || null : null,
+    verified_product_url: meta ? meta.verified_product_url || null : null,
+    links: meta ? meta.links || [] : [],
+    ...(meta ? { discovery: meta } : {}),
+  };
+}
+
+/**
+ * Top 3 = the engine's role picks, continued down the engine's own ranked list ("others") when it named fewer than
+ * three roles. The order is entirely Layer 2's; this only reads rows it already produced.
+ */
+export function topThree(result, snapshot, index) {
+  const rows = (result.picks || []).map((p) => pickRow(p, index));
+  const offers = new Map((snapshot.offers || []).map((o) => [o.id, o]));
+  const shops = new Map((snapshot.retailers || []).map((r) => [r.id, r]));
+  // Only a result that fits continues down the ranked list: after "nothing fits" / "no match" the engine's
+  // remaining rows are the closest misses (e.g. over budget), never recommendations.
+  for (const o of result.status === 'ok' ? result.others || [] : []) {
+    if (rows.length >= 3) break;
+    const offer = offers.get(o.offerId);
+    const meta = index ? index[o.product.id] : null;
+    rows.push({
+      role: 'ranked', product: o.product, score: o.score, fit: o.fit, affordability: o.affordability,
+      price: offer ? offer.price_egp : null, effCost: o.effCost, retailer: shops.get(o.retailerId) ? shops.get(o.retailerId).name : o.retailerId,
+      url: offer ? offer.url : null, reasons: [], notListed: [], warnings: [], ...verifiedFields(meta),
+    });
+  }
+  return rows.slice(0, 3).map((r, i) => ({ ...r, rank: i + 1 }));
+}
+
+function rateKey(request) { return 'expb:' + (request.headers.get('cf-connecting-ip') || 'local'); }
+
+/**
+ * @param {any} env
+ * @param {Request} request
+ * @param {{tenant: string, tokenOk: (env: any, req: Request) => boolean, readJson: (req: Request) => Promise<any>, json: Function, HttpError: any}} h
+ * @param {string} b  sub-route
+ */
+export async function expbRoute(env, request, h, b) {
+  const m = request.method;
+  if (m === 'GET' && b === 'status') {
+    const { available, missing } = providersFromEnv(env);
+    return h.json({
+      ok: true, mode: 'experiment_b', categories: EXPB_CATEGORIES,
+      providers: available.map((p) => ({ name: p.name, role: p.role, model: p.model })), missing,
+      experiment: env.EXPERIMENT || null,
+      web_search: String(env.DISCOVERY_WEB_SEARCH || '1') !== '0',
+      access: String(env.EXPB_PUBLIC || '') === '1' ? 'public' : 'admin_token',
+    });
+  }
+  if (m === 'GET' && b === 'runs') {
+    if (!h.tokenOk(env, request)) throw new h.HttpError(401, 'admin token required');
+    const limit = Math.min(50, Math.max(1, Number(new URL(request.url).searchParams.get('limit')) || 50));
+    const rows = await env.DB.prepare('SELECT * FROM expb_runs ORDER BY created_at DESC LIMIT ?').bind(limit).all();
+    const parse = (x) => (x ? JSON.parse(x) : null);
+    return h.json(rows.results.map((r) => ({ ...r, profile: parse(r.profile), providers: parse(r.providers), top3: parse(r.top3), catalog_top3: parse(r.catalog_top3), candidates: parse(r.candidates), metrics: parse(r.metrics) })));
+  }
+  if (m === 'GET' && b === 'diagnose') {
+    if (!h.tokenOk(env, request)) throw new h.HttpError(401, 'admin token required');
+    return h.json({ ok: true, providers: await diagnoseProviders(env) });
+  }
+  if (m === 'POST' && b === 'run') return runHandler(env, request, h);
+  throw new h.HttpError(404, `no route ${m} /api/expb/${b || ''}`);
+}
+
+async function runHandler(env, request, h) {
+  if (String(env.EXPB_PUBLIC || '') !== '1' && !h.tokenOk(env, request)) throw new h.HttpError(401, 'admin token required for discovery runs (they cost API money)');
+  const t0 = Date.now();
+  const body = await h.readJson(request);
+  const profile = body && body.profile;
+  if (!profile || typeof profile !== 'object') throw new h.HttpError(400, 'body must be {profile}: the NeedProfile from the session result screen');
+  const config = CONFIGS[profile.category];
+  if (!config || !EXPB_CATEGORIES.includes(config.id)) throw new h.HttpError(400, `Experiment B supports ${EXPB_CATEGORIES.join(', ')} only`);
+  const v = validateNeedProfile(profile, config);
+  if (!v.ok) throw new h.HttpError(422, 'invalid NeedProfile', v.errors.slice(0, 20));
+  if (!allowLlmCall(rateKey(request), Number(env.EXPB_RATE_PER_MIN) || 4)) throw new h.HttpError(429, 'too many discovery runs; wait a minute');
+
+  const catalog = await store.loadSnapshot(env, h.tenant);
+  const now = catalog.now; // same clock as the catalog path, so the two results are comparable
+  const requestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const { available, missing } = providersFromEnv(env);
+
+  const llmSource = new LLMProductDiscoverySource({
+    providers: available, missing, configs: CONFIGS, requestId,
+    verify: { enabled: String(env.DISCOVERY_VERIFY || '1') !== '0', maxUrls: Number(env.DISCOVERY_VERIFY_MAX_URLS) || 40, timeoutMs: Number(env.DISCOVERY_VERIFY_TIMEOUT_MS) || 6000 },
+    evidence: { enabled: String(env.DISCOVERY_EVIDENCE || '1') !== '0', maxCandidates: Number(env.DISCOVERY_EVIDENCE_MAX) || 12, maxQueries: Number(env.DISCOVERY_SEARCH_MAX_QUERIES) || 90, maxPerCandidate: Number(env.DISCOVERY_SEARCH_MAX_PER_CANDIDATE) || 20, providers: String(env.DISCOVERY_EVIDENCE_PROVIDERS || 'serper,tavily').split(',').map((x) => x.trim()) },
+  });
+  const [llm, cat] = await Promise.all([
+    recommendWith(llmSource, profile, now),
+    recommendWith(new ExistingCatalogProductSource(catalog), profile, now),
+  ]);
+  const meta = llm.meta;
+  const result = llm.result;
+  const top3 = topThree(result, llm.snapshot, meta.index);
+  const catalogTop3 = topThree(cat.result, catalog, null);
+  const total_ms = Date.now() - t0;
+  const status = !meta.ok ? 'no_providers' : result.status;
+  const out = {
+    ok: meta.ok,
+    request_id: requestId,
+    status,
+    error: meta.error,
+    need: meta.request.need,
+    providers: body.compact ? meta.providers.map(({ attempts, ...x }) => x) : meta.providers,
+    providers_missing: missing,
+    evidence_runs: meta.evidence_runs,
+    // compact: the smoke test and slow links skip the full raw provider outputs (they can exceed 100 KB).
+    raw: body.compact ? [] : meta.raw,
+    queries: meta.request.queries,
+    // Per-candidate observability (offers.js candidateReport): LLM claims vs verified listing facts.
+    candidates: meta.candidates_report,
+    verified_candidates: meta.candidates_report.filter((c) => c.status === 'verified'),
+    unverified_candidates: meta.candidates_report.filter((c) => c.status !== 'verified'),
+    unrankable: meta.unrankable,
+    top3,
+    ...(top3.length ? {} : { no_verified_message: 'No sufficiently verified Egyptian product listings were found for this request.' }),
+    result: body.compact ? { status: result.status, counts: result.counts } : { status: result.status, others: result.others, warnings: result.warnings, gaveUp: result.gaveUp, nothingFits: result.nothingFits, counts: result.counts, assumptions: result.assumptions, trace: result.trace },
+    catalog: { snapshot_id: catalog.snapshot_id, status: cat.result.status, top3: catalogTop3, note: 'Same NeedProfile, same engine, synthetic demo catalog (comparison only).' },
+    notes: [
+      'Provider consensus, evidence confidence and verification are metadata; the ranking is the unchanged Recommendation Engine (customer fit, price fit).',
+      'Only verified offers are ranked: a direct Egyptian product page, an EGP price from the listing or the page, the exact variant and an identifiable retailer. LLM prices, retailers and stock are unverified claims (shown, never ranked).',
+      'Top results are never back-filled with unverified candidates: fewer than three verified products means fewer results.',
+      'Verified offers assume nationwide delivery (fee 0, 3 days) and carry no installment plans.',
+      'Nothing discovered here was saved to any catalog.',
+    ],
+    metrics: { ...meta.metrics, total_ms, providers_missing: missing.map((x) => x.name) },
+  };
+  console.log(JSON.stringify({ expb_run: requestId, status, metrics: out.metrics, providers: meta.providers.map((p) => ({ provider: p.provider, ok: p.ok, ms: p.latency_ms, n: p.candidate_count, usage: p.usage, cost_usd: p.cost_usd, error: p.error })) }));
+  try {
+    await env.DB.prepare('INSERT INTO expb_runs (id, created_at, category, status, providers_ok, providers_called, consolidated, total_ms, cost_usd, profile, providers, top3, catalog_top3, candidates, metrics) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .bind(requestId, new Date().toISOString(), config.id, status, meta.metrics.providers_ok, meta.metrics.providers_called, meta.metrics.consolidated, total_ms, meta.metrics.estimated_cost_usd,
+        JSON.stringify(profile), JSON.stringify(meta.providers.map(({ attempts, ...p }) => p)), JSON.stringify(top3.map((p) => ({ product: p.product, score: p.score, price: p.price, mpn: p.mpn, verified_price: p.verified_price, verified_retailer: p.verified_retailer, verified_product_url: p.verified_product_url, providers: p.discovery && p.discovery.providers }))), JSON.stringify(catalogTop3.map((p) => ({ product: p.product, score: p.score, price: p.price }))),
+        JSON.stringify(meta.candidates_report.map(({ llm_claims, evidence_sources, ...c }) => ({ ...c, evidence_sources: (evidence_sources || []).slice(0, 6).map((e) => ({ provider: e.provider, type: e.type, country: e.country, url: e.url, price: e.price, currency: e.currency, strength: e.strength })), llm_claims: (llm_claims || []).slice(0, 4) }))),
+        JSON.stringify(out.metrics))
+      .run();
+  } catch (e) {
+    out.metrics.log_error = String((e && e.message) || e).slice(0, 120); // the run log is best effort
+  }
+  return h.json(out, meta.ok ? 200 : 502);
+}
+

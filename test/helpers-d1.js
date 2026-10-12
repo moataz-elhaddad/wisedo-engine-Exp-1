@@ -1,7 +1,7 @@
 // A small D1 stand-in over node:sqlite, enough to run the Worker's handlers in tests (prepare/bind/all/first/run,
 // batch as one transaction). Not used in production.
 import { DatabaseSync } from 'node:sqlite';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -9,7 +9,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 export function createD1() {
   const db = new DatabaseSync(':memory:');
-  db.exec(readFileSync(join(ROOT, 'migrations/0001_init.sql'), 'utf8'));
+  for (const f of readdirSync(join(ROOT, 'migrations')).filter((x) => x.endsWith('.sql')).sort()) db.exec(readFileSync(join(ROOT, 'migrations', f), 'utf8'));
   let queries = 0;
   const stmt = (sql, params = []) => ({
     sql,
